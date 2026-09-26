@@ -4,6 +4,12 @@ node_modules/
 # 调研与需求文档（本地资料，不入库）
 opencode-v2-research/
 
+# 覆盖全局 gitignore 的 .opencode/ 忽略规则：
+# 插件源码必须入库，其余 .opencode 本地状态保持忽略
+!.opencode/
+.opencode/*
+!.opencode/plugins/
+
 # 构建产物
 dist/
 *.tsbuildinfo
