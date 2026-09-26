@@ -17,6 +17,7 @@ import {
   successRate,
   snapshotOf,
   subtreeBucket,
+  seedStepCounters,
 } from "../shared/aggregate.ts"
 
 const tokens = { input: 100_000, cacheRead: 900_000, cacheWrite: 50_000, output: 20_000, reasoning: 5_000 }
@@ -212,14 +213,27 @@ describe("aggregate", () => {
     assert.equal(b.steps, agg.totals.steps)
   })
 
-  test("非 primary 不写会话桶", () => {
+  test("非 primary 只占位会话桶，用量一律不计入", () => {
     const agg = emptyAggregates()
     assert.equal(
       record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "title", session_id: "ses_a", session: sinfo(null) }),
       false,
     )
-    assert.deepEqual(agg.sessions, {})
+    const b = agg.sessions["ses_a"]
+    assert.ok(b, "桶要建出来，否则只有辅助请求的会话编号会归 1")
+    assert.equal(b.steps, 0)
+    assert.equal(b.input, 0)
+    assert.equal(b.cost, 0)
     assert.equal(agg.totals.steps, 0)
+    assert.equal(agg.totals.cost, 0)
+    assert.deepEqual(agg.daily, {})
+    assert.deepEqual(agg.monthly, {})
+    // 但 token 要记进 aux：它是和 session.usage.updated 对账的依据（shared/aux.ts）
+    assert.equal(agg.aux["ses_a"]!.input, tokens.input)
+    assert.equal(agg.aux["ses_a"]!.cacheRead, tokens.cacheRead)
+    assert.equal(agg.aux["ses_a"]!.cacheWrite, tokens.cacheWrite)
+    assert.equal(agg.aux["ses_a"]!.output, tokens.output)
+    assert.equal(agg.aux["ses_a"]!.reasoning, tokens.reasoning)
   })
 
   test("subtreeBucket 聚合整棵子树且不重复计数", () => {
@@ -251,5 +265,91 @@ describe("aggregate", () => {
     assert.equal(subtreeBucket(agg, "child1").steps, 2)
     assert.equal(subtreeBucket(agg, "grand").steps, 1)
     assert.equal(subtreeBucket(agg, "missing").steps, 0)
+  })
+})
+
+describe("step_index 续接", () => {
+  const session = {
+    parent_id: null as string | null,
+    title: "t",
+    provider_id: "p",
+    model_id: "m",
+    model_name: "M",
+    variant: null as string | null,
+    agent: "build",
+  }
+  const row = (step_index: number, kind: "primary" | "title" = "primary") => ({
+    ts: step_index,
+    date: "2026-09-26",
+    tokens,
+    cost: 0,
+    ok: true,
+    kind,
+    session_id: "ses_a",
+    session,
+    step_index,
+  })
+
+  test("会话桶记录见过的最大步号", () => {
+    const agg = emptyAggregates()
+    record(agg, row(5))
+    record(agg, row(3)) // 回放顺序可能乱，取最大值
+    record(agg, row(7))
+    assert.equal(agg.sessions["ses_a"]!.step_index, 7)
+  })
+
+  test("非 primary 行也推进步号，但不计入用量", () => {
+    const agg = emptyAggregates()
+    record(agg, row(2))
+    record(agg, row(9, "title"))
+    assert.equal(agg.sessions["ses_a"]!.step_index, 9)
+    assert.equal(agg.totals.steps, 1)
+  })
+
+  test("首行就是非 primary 时也建桶占位，用量仍不计入", () => {
+    const agg = emptyAggregates()
+    assert.equal(record(agg, row(1, "title")), false)
+    // 桶只为续接 step_index 而建：用量字段必须全是 0
+    const b = agg.sessions["ses_a"]
+    assert.ok(b)
+    assert.equal(b.step_index, 1)
+    assert.equal(b.steps, 0)
+    assert.equal(b.input, 0)
+    assert.equal(agg.totals.steps, 0)
+    assert.deepEqual(agg.daily, {})
+
+    // 之后的第一条 primary 行照常把编号往前推
+    record(agg, row(2))
+    assert.equal(agg.sessions["ses_a"]!.step_index, 2)
+    assert.equal(agg.sessions["ses_a"]!.steps, 1)
+    assert.equal(agg.totals.steps, 1)
+  })
+
+  test("旧缓存里没有 step_index 字段的会话桶也能被后续行推进", () => {
+    const agg = emptyAggregates()
+    record(agg, row(3))
+    // 模拟旧版 .aggregate.json 反序列化出来的桶：压根没这个字段
+    Reflect.deleteProperty(agg.sessions["ses_a"]!, "step_index")
+    assert.equal(seedStepCounters(agg).get("ses_a"), undefined)
+
+    record(agg, row(6)) // 若直接和 undefined 比较，这里会永远为 false
+    assert.equal(agg.sessions["ses_a"]!.step_index, 6)
+  })
+
+  test("JSON 往返（聚合缓存落盘再读）后仍能拿到步号", () => {
+    const agg = emptyAggregates()
+    record(agg, row(4))
+    const reloaded = JSON.parse(JSON.stringify(agg)) as typeof agg
+    assert.equal(seedStepCounters(reloaded).get("ses_a"), 4)
+    // 重载时游标已覆盖全部行 → readSince 返回 0 行，只能靠这里续接
+    assert.equal((seedStepCounters(reloaded).get("ses_a") ?? 0) + 1, 5)
+  })
+
+  test("旧缓存缺 step_index 字段容忍为 0，未知会话不返回", () => {
+    const legacy = JSON.parse(
+      JSON.stringify({ sessions: { ses_old: { ...emptyAggregates().totals, last_ts: 1 } } }),
+    )
+    assert.equal(seedStepCounters(legacy).get("ses_old"), undefined)
+    assert.equal(seedStepCounters(emptyAggregates()).size, 0)
   })
 })

@@ -129,6 +129,9 @@ export async function readAggregate(baseDir: string): Promise<AggregateFile | nu
     const s = v as Partial<AggregateFile>
     if (!s.aggregates || typeof s.cursors !== "object") return null
     if (s.schema !== undefined && s.schema !== 1) return null // 版本不符：丢弃重建
+    // 读取端容错：旧版缓存没有 aux 字段，补空对象而不是让它 undefined 炸掉对账
+    if (!s.aggregates.aux || typeof s.aggregates.aux !== "object") s.aggregates.aux = {}
+    if (!s.aggregates.sessions) s.aggregates.sessions = {}
     return s as AggregateFile
   } catch {
     return null

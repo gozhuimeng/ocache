@@ -33,6 +33,12 @@ export interface SessionBucket extends Bucket {
   model_name: string | null
   variant: string | null
   agent: string
+  /**
+   * 该会话已见的最大 step_index。
+   * 存在这里是为了让插件热重载/进程重启后能续接编号——
+   * 否则游标已覆盖全部行、增量同步读不到任何行，编号会从 1 重来。
+   */
+  step_index: number
 }
 
 /** 会话维度的归属信息（来自行本身或 session.get）。 */
@@ -46,6 +52,18 @@ export interface SessionInfoLite {
   readonly agent: string
 }
 
+/**
+ * 纯 token 累加和（没有 steps / cost 之类的计数字段）。
+ * 字段可变：StepTokens 的字段是 readonly，不能直接累加。
+ */
+export interface TokenSum {
+  input: number
+  cacheRead: number
+  cacheWrite: number
+  output: number
+  reasoning: number
+}
+
 export interface Aggregates {
   totals: Bucket
   /** YYYY-MM-DD → Bucket */
@@ -54,14 +72,34 @@ export interface Aggregates {
   monthly: Record<string, Bucket>
   /** sessionID → SessionBucket */
   sessions: Record<string, SessionBucket>
+  /**
+   * sessionID → 该会话**非 primary** 请求（title / compaction / generate）的 token 和。
+   *
+   * 不进任何统计桶（面板与外部统计口径都是 primary），只用来和
+   * `session.usage.updated` 上报的累计台账对账：差额就是漏记的辅助请求。
+   * 重建自 JSONL，因此缓存丢了也能复原（派生数据的硬要求）。
+   */
+  aux: Record<string, TokenSum>
 }
 
 export function emptyBucket(): Bucket {
   return { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, steps: 0, ok: 0, error: 0, cost: 0 }
 }
 
+export function emptyTokenSum(): TokenSum {
+  return { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 }
+}
+
 export function emptyAggregates(): Aggregates {
-  return { totals: emptyBucket(), daily: {}, monthly: {}, sessions: {} }
+  return { totals: emptyBucket(), daily: {}, monthly: {}, sessions: {}, aux: {} }
+}
+
+export function addToTokenSum(sum: TokenSum, t: StepTokens): void {
+  sum.input += t.input
+  sum.cacheRead += t.cacheRead
+  sum.cacheWrite += t.cacheWrite
+  sum.output += t.output
+  sum.reasoning += t.reasoning
 }
 
 function addTo(bucket: Bucket, t: StepTokens, cost: number, ok: boolean): void {
@@ -86,14 +124,48 @@ export interface RecordInput {
   readonly kind: Kind
   readonly session_id?: string
   readonly session?: SessionInfoLite
+  /** 本行在会话内的步号，用于续接编号；缺省则不动计数。 */
+  readonly step_index?: number
 }
 
 /**
- * 计入一条 step 记录。
- * 非 primary 的请求连同会话桶一并跳过，保证面板与外部统计同口径。
+ * 计入一条记录。
+ *
+ * - `kind !== "primary"` 的行**不计入用量**（面板与外部统计同口径），
+ *   但会话桶照建、step_index 照记：title / compaction 行也各占一个序号，
+ *   否则只有辅助请求的会话在热重载后编号会归 1、与文件脱节。
+ * - 归属信息只由 primary 行刷新：辅助请求发生时 session 的 model / title
+ *   往往还没定，写进去会把好的归属覆盖成 "unknown"。
  */
 export function record(agg: Aggregates, input: RecordInput): boolean {
-  if (input.kind !== "primary") return false
+  const id = input.session_id
+  const s = input.session
+  // 旧缓存没有 step_index 字段，比较前一律归一为 0（读取端容错）。
+  const b =
+    id && s
+      ? (agg.sessions[id] ??= {
+          ...emptyBucket(),
+          last_ts: input.ts,
+          parent_id: s.parent_id,
+          title: s.title,
+          provider_id: s.provider_id,
+          model_id: s.model_id,
+          model_name: s.model_name,
+          variant: s.variant,
+          agent: s.agent,
+          step_index: 0,
+        })
+      : undefined
+  if (b) {
+    if (input.step_index !== undefined && input.step_index > stepIndexOf(b)) b.step_index = input.step_index
+    if (input.ts > b.last_ts) b.last_ts = input.ts
+  }
+
+  if (input.kind !== "primary") {
+    // 辅助请求只累计到 aux（对账用），不进任何统计桶。
+    if (id) addToTokenSum((agg.aux[id] ??= emptyTokenSum()), input.tokens)
+    return false
+  }
   addTo(agg.totals, input.tokens, input.cost, input.ok)
   const day = input.date
   const month = day.slice(0, 7)
@@ -102,23 +174,9 @@ export function record(agg: Aggregates, input: RecordInput): boolean {
   addTo(agg.daily[day], input.tokens, input.cost, input.ok)
   addTo(agg.monthly[month], input.tokens, input.cost, input.ok)
 
-  const id = input.session_id
-  const s = input.session
-  if (id && s) {
-    const b = (agg.sessions[id] ??= {
-      ...emptyBucket(),
-      last_ts: input.ts,
-      parent_id: s.parent_id,
-      title: s.title,
-      provider_id: s.provider_id,
-      model_id: s.model_id,
-      model_name: s.model_name,
-      variant: s.variant,
-      agent: s.agent,
-    })
+  if (b && s) {
     addTo(b, input.tokens, input.cost, input.ok)
-    if (input.ts > b.last_ts) b.last_ts = input.ts
-    // 归属信息取最新一步的快照（rename / 换模型后不再停留在旧值）
+    // 归属信息取最新一条 primary 行的快照（rename / 换模型后不再停留在旧值）
     b.parent_id = s.parent_id
     b.title = s.title
     b.provider_id = s.provider_id
@@ -128,6 +186,25 @@ export function record(agg: Aggregates, input: RecordInput): boolean {
     b.agent = s.agent
   }
   return true
+}
+
+/** 会话桶的已见最大步号；旧缓存缺字段时归一为 0。 */
+function stepIndexOf(b: SessionBucket): number {
+  return typeof b.step_index === "number" && Number.isFinite(b.step_index) ? b.step_index : 0
+}
+
+/**
+ * 从聚合缓存派生各会话"已见最大步号"，供插件热重载 / 进程重启后续接
+ * step_index（AGENTS.md：纯逻辑可脱离 OpenCode 单测）。
+ * 旧缓存可能没有 step_index 字段，容忍为 0。
+ */
+export function seedStepCounters(agg: Aggregates): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const [id, b] of Object.entries(agg.sessions)) {
+    const v = stepIndexOf(b)
+    if (v > 0) out.set(id, v)
+  }
+  return out
 }
 
 /** 命中率 = cacheRead / (input + cacheRead + cacheWrite)；无输入时为 0。 */

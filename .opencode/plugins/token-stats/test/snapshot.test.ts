@@ -121,6 +121,7 @@ describe("selectSessions", () => {
     model_name: "M",
     variant: null,
     agent: "build",
+    step_index: 0,
   })
 
   test("字段按 snake_case 平铺，货币标签统一填入", () => {
