@@ -8,6 +8,7 @@ import {
   NO_DATA,
   lineHeader,
   lineSessionCounts,
+  lineSessionRecent,
   lineSessionMissRead,
   lineSessionWriteOut,
   lineSessionReasonCost,
@@ -20,6 +21,7 @@ import {
   isSnapshot,
   subtreeBucketOf,
   subtreeIds,
+  subtreeRecentOf,
   SNAPSHOT_SCHEMA,
   type SessionSnapshot,
   type Snapshot,
@@ -45,6 +47,7 @@ function sess(over: Partial<SessionSnapshot> & { session_id: string }): SessionS
     model_name: null,
     variant: null,
     agent: null,
+    recent: [],
     ...over,
   }
 }
@@ -207,15 +210,15 @@ describe("面板行", () => {
 
   test("标题行：面板名 + 聚合范围 + 记录状态", () => {
     // 快照未到（updated=0）时不显示状态，避免闪一句"仅内存"
-    assert.equal(lineHeader(emptySnapshot("¥"), "x"), "Token 用量")
+    assert.equal(lineHeader(emptySnapshot("¥"), "x"), "ocache")
     const solo = snap({ updated: 1, record: true, sessions: { x: sess({ session_id: "x" }) } })
-    assert.equal(lineHeader(solo, "x"), "Token 用量 · ● 记录中")
+    assert.equal(lineHeader(solo, "x"), "ocache · ● 记录中")
     // s 是首帧之前的快照（updated=0），补上更新时间才会有状态尾巴
-    assert.equal(lineHeader({ ...s, updated: 1 }, "s1"), "Token 用量 +1 子会话 · ○ 仅内存")
+    assert.equal(lineHeader({ ...s, updated: 1 }, "s1"), "ocache +1 子会话 · ○ 仅内存")
     // 会话还没数据时同样只报聚合范围，具体行各自退 "—"
     assert.equal(
       lineHeader(snap({ updated: 1, record: true }), "未见过"),
-      "Token 用量 · ● 记录中",
+      "ocache · ● 记录中",
     )
   })
 
@@ -279,6 +282,66 @@ describe("面板行", () => {
     assert.equal(lineToday(empty), NO_DATA)
     assert.equal(lineMonth(empty), NO_DATA)
     assert.equal(lineTotal(empty), NO_DATA)
+  })
+})
+
+describe("本次命中率与环比", () => {
+  /** 39/40 = 97.5% */
+  const HI = { input: 1, cacheRead: 39, cacheWrite: 0 }
+  /** 239/250 = 95.6% */
+  const LO = { input: 11, cacheRead: 239, cacheWrite: 0 }
+  const at = (ts: number, t: typeof HI) => ({ ts, ...t })
+
+  test("首次请求没有基线：只显示命中率，不带符号", () => {
+    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI)] }) } })
+    assert.equal(lineSessionRecent(s, "s1"), "本次 97.5%")
+  })
+
+  test("上升带 +、下降带 -，不用箭头", () => {
+    const up = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, LO)] }) } })
+    assert.equal(lineSessionRecent(up, "s1"), "本次 97.5% +1.9%")
+
+    const down = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, LO), at(100, HI)] }) } })
+    assert.equal(lineSessionRecent(down, "s1"), "本次 95.6% -1.9%")
+  })
+
+  test("与上次持平不显示 +0%", () => {
+    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, HI)] }) } })
+    assert.equal(lineSessionRecent(s, "s1"), "本次 97.5%")
+  })
+
+  test("子树跨会话取全局最近两条，而不是各取各的", () => {
+    const s = snap({
+      sessions: {
+        root: sess({ session_id: "root", recent: [at(300, HI), at(50, HI)] }),
+        child: sess({ session_id: "child", parent_id: "root", recent: [at(200, LO)] }),
+      },
+    })
+    // 正确取法：300 的 HI 与 200 的 LO → +1.9%
+    // 若退化成"只看 root 自己两条"，会得到两条 HI → 无符号
+    assert.equal(lineSessionRecent(s, "root"), "本次 97.5% +1.9%")
+    // 子会话自己的子树只有一条，没有基线 → 不带符号
+    assert.equal(lineSessionRecent(s, "child"), "本次 95.6%")
+  })
+
+  test("会话还没写过成功请求、或未见过该会话 → 占位", () => {
+    assert.equal(lineSessionRecent(snap({ sessions: {} }), "没有"), NO_DATA)
+    const none = snap({ sessions: { s1: sess({ session_id: "s1" }) } })
+    assert.equal(lineSessionRecent(none, "s1"), NO_DATA)
+  })
+
+  test("子树最近两条按 ts 倒序，超出两条的直接丢弃", () => {
+    const s = snap({
+      sessions: {
+        root: sess({ session_id: "root", recent: [at(10, HI), at(90, LO)] }),
+        child: sess({ session_id: "child", parent_id: "root", recent: [at(50, HI), at(70, LO), at(30, HI)] }),
+      },
+    })
+    const got = subtreeRecentOf(s.sessions, "root")
+    assert.deepEqual(
+      got.map((e) => e.ts),
+      [90, 70],
+    )
   })
 })
 

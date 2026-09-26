@@ -23,9 +23,36 @@ export interface Bucket {
   cost: number
 }
 
+/**
+ * 一次**成功 primary 请求**的输入侧三档明细。
+ *
+ * 面板"本次命中率 + 环比"的唯一依据。只存输入侧：命中率的分母就是
+ * `input + cacheRead + cacheWrite`，output / reasoning 不参与计算。
+ * 存原始值而非比率——派生指标一律在查询端算（AGENTS.md）。
+ */
+export interface RecentEntry {
+  /** 该请求落行的时刻，子树挑"最近两条"时按它排序。 */
+  ts: number
+  input: number
+  cacheRead: number
+  cacheWrite: number
+}
+
 /** 按会话分桶：面板"当前会话"块与子会话聚合的数据来源（D8）。 */
 export interface SessionBucket extends Bucket {
   last_ts: number
+  /**
+   * 该会话**最近两条**成功 primary 请求，新→旧，至多 2 条。
+   *
+   * 为什么是 2 条：面板显示的是整棵会话子树的"本次 / 上一次"，而子树聚合
+   * 时各会话只有自己的桶。取"各会话最近两条"并集后按 ts 排序取前二，恰好
+   * 就是子树全局的前二——若某个会话占了全局前二中的两条，那必然是它自己
+   * 最近的两条，已经在并集里了。2 条是这个口径的最小充分集。
+   *
+   * 只记成功的请求（失败那次的 token 明细不完整，会让环比无意义地暴跌），
+   * 因此字段缺失或为空表示该会话还没有可用基线，显示时不带符号。
+   */
+  recent: RecentEntry[]
   parent_id: string | null
   title: string | null
   provider_id: string
@@ -146,6 +173,7 @@ export function record(agg: Aggregates, input: RecordInput): boolean {
       ? (agg.sessions[id] ??= {
           ...emptyBucket(),
           last_ts: input.ts,
+          recent: [],
           parent_id: s.parent_id,
           title: s.title,
           provider_id: s.provider_id,
@@ -176,6 +204,15 @@ export function record(agg: Aggregates, input: RecordInput): boolean {
 
   if (b && s) {
     addTo(b, input.tokens, input.cost, input.ok)
+    // 本次命中率的基线：只记成功的 primary（失败行的 token 明细不完整）
+    if (input.ok) {
+      pushRecent(b, {
+        ts: input.ts,
+        input: input.tokens.input,
+        cacheRead: input.tokens.cacheRead,
+        cacheWrite: input.tokens.cacheWrite,
+      })
+    }
     // 归属信息取最新一条 primary 行的快照（rename / 换模型后不再停留在旧值）
     b.parent_id = s.parent_id
     b.title = s.title
@@ -186,6 +223,18 @@ export function record(agg: Aggregates, input: RecordInput): boolean {
     b.agent = s.agent
   }
   return true
+}
+
+/**
+ * 按时间倒序插入一条成功请求，只留最近 2 条。
+ *
+ * 不假设行是按 ts 顺序到达的：全量重建时跨文件的行可能乱序，
+ * 排序保证"最近两条"始终是时间意义上的最近两条。
+ */
+function pushRecent(b: SessionBucket, e: RecentEntry): void {
+  b.recent.push(e)
+  b.recent.sort((x, y) => y.ts - x.ts)
+  if (b.recent.length > 2) b.recent.length = 2
 }
 
 /** 会话桶的已见最大步号；旧缓存缺字段时归一为 0。 */
@@ -207,8 +256,13 @@ export function seedStepCounters(agg: Aggregates): Map<string, number> {
   return out
 }
 
-/** 命中率 = cacheRead / (input + cacheRead + cacheWrite)；无输入时为 0。 */
-export function hitRate(t: StepTokens): number {
+/**
+ * 命中率 = cacheRead / (input + cacheRead + cacheWrite)；无输入时为 0。
+ *
+ * 入参放宽到只读三档：累计桶（Bucket）与单条请求明细（RecentEntry）
+ * 都能直接算，避免为了复用把明细摊成完整 StepTokens。
+ */
+export function hitRate(t: Pick<StepTokens, "input" | "cacheRead" | "cacheWrite">): number {
   const denom = t.input + t.cacheRead + t.cacheWrite
   return denom > 0 ? t.cacheRead / denom : 0
 }

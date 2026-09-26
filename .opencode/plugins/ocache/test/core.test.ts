@@ -148,7 +148,7 @@ describe("aggregate", () => {
 
   test("命中率与成功率", () => {
     assert.equal(hitRate(tokens), 900_000 / 1_050_000)
-    assert.equal(hitRate({ input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 }), 0)
+    assert.equal(hitRate({ input: 0, cacheRead: 0, cacheWrite: 0 }), 0)
 
     const agg = emptyAggregates()
     record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" })
@@ -211,6 +211,41 @@ describe("aggregate", () => {
     // 会话桶合计必须与 totals 一致
     assert.equal(b.cost, agg.totals.cost)
     assert.equal(b.steps, agg.totals.steps)
+  })
+
+  test("recent 只记成功的 primary，按时间留最近两条", () => {
+    const agg = emptyAggregates()
+    const push = (ts: number, ok: boolean, kind: "primary" | "title" = "primary"): void => {
+      record(agg, {
+        ts,
+        date: "2026-09-26",
+        tokens,
+        cost: 1,
+        ok,
+        kind,
+        session_id: "ses_a",
+        session: sinfo(null),
+      })
+    }
+
+    push(300, true)
+    push(100, true) // 乱序到达也按 ts 排
+    push(400, false) // 失败：token 明细不完整，不进基线
+    push(200, true, "title") // 辅助请求：口径同 kind 过滤
+    push(500, true)
+
+    const recent = agg.sessions["ses_a"]!.recent
+    assert.equal(recent.length, 2, "长任务下也不会超过两条")
+    assert.deepEqual(
+      recent.map((e) => e.ts),
+      [500, 300],
+      "按 ts 倒序，最早的被挤掉",
+    )
+    assert.equal(recent[0]!.input, tokens.input)
+    assert.equal(recent[0]!.cacheRead, tokens.cacheRead)
+    assert.equal(recent[0]!.cacheWrite, tokens.cacheWrite)
+    // 存的是原始三档而非比率：派生指标在查询端算
+    assert.equal(recent[0]!.ts, 500)
   })
 
   test("非 primary 只占位会话桶，用量一律不计入", () => {

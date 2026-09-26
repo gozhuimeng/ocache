@@ -8,7 +8,7 @@
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { randomBytes } from "node:crypto"
-import { emptyBucket, type Aggregates, type Bucket } from "./aggregate.ts"
+import { emptyBucket, type Aggregates, type Bucket, type RecentEntry } from "./aggregate.ts"
 
 /** 会话实时块（服务端每步更新；含子会话行以便展示期聚合）。 */
 export interface SessionSnapshot {
@@ -32,6 +32,11 @@ export interface SessionSnapshot {
   readonly model_name: string | null
   readonly variant: string | null
   readonly agent: string | null
+  /**
+   * 该会话最近两条成功 primary 请求（新→旧），供 TUI 算"本次命中率 + 环比"。
+   * 读取端容缺（旧快照没有这个字段），消费方一律 `?? []`。
+   */
+  readonly recent: readonly RecentEntry[]
 }
 
 /** 快照里保留的会话块数量上限（按 last_ts 倒序），控制快照体积。 */
@@ -132,6 +137,10 @@ export async function readAggregate(baseDir: string): Promise<AggregateFile | nu
     // 读取端容错：旧版缓存没有 aux 字段，补空对象而不是让它 undefined 炸掉对账
     if (!s.aggregates.aux || typeof s.aggregates.aux !== "object") s.aggregates.aux = {}
     if (!s.aggregates.sessions) s.aggregates.sessions = {}
+    // 旧缓存没有 recent：补空数组，"本次"退化为无基线（不显示符号），不值得为此全量重建
+    for (const b of Object.values(s.aggregates.sessions)) {
+      if (!Array.isArray(b.recent)) b.recent = []
+    }
     return s as AggregateFile
   } catch {
     return null
@@ -172,6 +181,7 @@ export function selectSessions(
       model_name: b.model_name,
       variant: b.variant,
       agent: b.agent || null,
+      recent: b.recent ?? [],
     }
   }
   return out
@@ -224,6 +234,26 @@ export function subtreeBucketOf(
     out.cost += b.cost
   }
   return out
+}
+
+/**
+ * 快照侧子树"最近两条成功请求"，新→旧。
+ *
+ * 各会话只留得下自己的最近两条，但子树全局的前二必然落在这个并集里：
+ * 若某会话独占全局前二中的两条，那正是它自己最近的两条，已在并集内。
+ * 因此取并集按 ts 排序取前二，等价于把子树所有请求排一遍。
+ */
+export function subtreeRecentOf(
+  sessions: Record<string, SessionSnapshot>,
+  rootID: string,
+): readonly RecentEntry[] {
+  const all: RecentEntry[] = []
+  for (const id of subtreeIds(sessions, rootID)) {
+    const recent = sessions[id]?.recent
+    if (recent) all.push(...recent)
+  }
+  all.sort((a, b) => b.ts - a.ts)
+  return all.slice(0, 2)
 }
 
 /** 服务端还没发布过快照时的占位（TUI 初始值），字段齐全避免到处判空。 */

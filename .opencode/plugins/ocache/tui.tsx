@@ -21,6 +21,7 @@ import {
   lineSessionCounts,
   lineSessionMissRead,
   lineSessionReasonCost,
+  lineSessionRecent,
   lineSessionWriteOut,
   lineToday,
   lineTotal,
@@ -81,6 +82,7 @@ export default Plugin.define({
         <box flexDirection="column">
           <text>{lineHeader(snap(), input.sessionID)}</text>
           <text>{lineSessionCounts(snap(), input.sessionID)}</text>
+          <text>{lineSessionRecent(snap(), input.sessionID)}</text>
           <text>{lineSessionMissRead(snap(), input.sessionID)}</text>
           <text>{lineSessionWriteOut(snap(), input.sessionID)}</text>
           <text>{lineSessionReasonCost(snap(), input.sessionID)}</text>

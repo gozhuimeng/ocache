@@ -11,6 +11,7 @@ import { hitRate, successRate, type Bucket } from "./aggregate.ts"
 import {
   subtreeBucketOf,
   subtreeIds,
+  subtreeRecentOf,
   type SessionSnapshot,
   type Snapshot,
 } from "./snapshot.ts"
@@ -106,8 +107,10 @@ export function sessionBucket(s: Snapshot, sid: string): Bucket {
 /**
  * 第 1 行：面板标题 + 聚合范围 + 记录状态。
  *
- * 不再重复显示会话标题——侧栏顶部本来就有，且侧栏窄、中文标题按格截断后
- * 常常只剩半句。这里只在存在子会话时补一句聚合范围，说明"下面的数字把
+ * 标题用插件名 `ocache`——与插件 id、仓库、数据目录同名，便于一眼认出
+ * 这份数据的来源（改名前写作"Token 用量"，与 OpenCode 内置统计容易混淆）。
+ * 不重复显示会话标题：侧栏顶部本来就有，且侧栏窄、中文标题按格截断后
+ * 常常只剩半句。只在存在子会话时补一句聚合范围，说明"下面的数字把
  * 子代理也算进来了"。
  *
  * 记录状态必须常驻：`record` 关闭时 JSONL 一个字节都不写，数据只活在
@@ -118,7 +121,7 @@ export function lineHeader(s: Snapshot, sid: string): string {
   const kids = Math.max(0, subtreeIds(s.sessions, sid).length - 1)
   const scope = kids > 0 ? ` +${kids} 子会话` : ""
   const state = s.updated === 0 ? "" : s.record ? " · ● 记录中" : " · ○ 仅内存"
-  return `Token 用量${scope}${state}`
+  return `ocache${scope}${state}`
 }
 
 /** 第 2 行：请求数 · 请求成功率 · 缓存命中率（当前会话含子会话）。 */
@@ -129,7 +132,34 @@ export function lineSessionCounts(s: Snapshot, sid: string): string {
   return `请求 ${fmtInt(b.steps)} · 成功 ${fmtPct(successRate(b))} · 命中 ${fmtPct(hitRate(b))}`
 }
 
-/** 第 3 行：输入未命中 · 缓存读。 */
+/**
+ * 第 3 行：本次请求命中率 + 相对上一次请求的环比。
+ *
+ * 与第 2 行的"命中"不同：那行是会话树**累计**的命中率，这行只看最近一次
+ * 成功的 primary 请求，能立刻反映"这一轮到底缓存住没住"。
+ *
+ * - 环比用 `+` / `-` 而不是箭头：箭头在部分字体里字宽不齐、还得靠字形猜
+ *   方向，`+1.9%` 直白得多。
+ * - 首条请求没有基线、或与上次持平（一位小数舍入后为 0）时不带符号，
+ *   避免 `+0%` 这种噪音，两者都显示成纯命中率。
+ * - 失败请求与 title / compaction / generate 不进基线（口径同 kind 过滤），
+ *   所以"本次"可能停在上一次成功的请求上。
+ */
+export function lineSessionRecent(s: Snapshot, sid: string): string {
+  if (!s.sessions[sid]) return NO_DATA
+  const [cur, prev] = subtreeRecentOf(s.sessions, sid)
+  if (!cur) return NO_DATA
+  const base = hitRate(cur)
+  let line = `本次 ${fmtPct(base)}`
+  if (prev) {
+    const delta = base - hitRate(prev)
+    const text = fmtPct(Math.abs(delta))
+    if (text !== "0%") line += ` ${delta > 0 ? "+" : "-"}${text}`
+  }
+  return line
+}
+
+/** 第 4 行：输入未命中 · 缓存读。 */
 export function lineSessionMissRead(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -137,7 +167,7 @@ export function lineSessionMissRead(s: Snapshot, sid: string): string {
   return `未命中 ${fmtCount(b.input)} · 缓存读 ${fmtCount(b.cacheRead)}`
 }
 
-/** 第 4 行：缓存写 · 输出。 */
+/** 第 5 行：缓存写 · 输出。 */
 export function lineSessionWriteOut(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -145,7 +175,7 @@ export function lineSessionWriteOut(s: Snapshot, sid: string): string {
   return `缓存写 ${fmtCount(b.cacheWrite)} · 输出 ${fmtCount(b.output)}`
 }
 
-/** 第 5 行：推理 · 费用。 */
+/** 第 6 行：推理 · 费用。 */
 export function lineSessionReasonCost(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -153,21 +183,21 @@ export function lineSessionReasonCost(s: Snapshot, sid: string): string {
   return `推理 ${fmtCount(b.reasoning)} · 费用 ${fmtCost(b.cost, s.currency)}`
 }
 
-/** 第 7 行：今日。 */
+/** 第 8 行：今日。 */
 export function lineToday(s: Snapshot): string {
   const b = s.agg?.today
   if (!b) return NO_DATA
   return `今日 ${fmtCost(b.cost, s.currency)} · ${fmtPct(successRate(b))} 成功`
 }
 
-/** 第 8 行：本月。 */
+/** 第 9 行：本月。 */
 export function lineMonth(s: Snapshot): string {
   const b = s.agg?.month
   if (!b) return NO_DATA
   return `本月 ${fmtCost(b.cost, s.currency)} · ${fmtPct(successRate(b))} 成功`
 }
 
-/** 第 9 行：历史累计（请求数 + 成功率）。 */
+/** 第 10 行：历史累计（请求数 + 成功率）。 */
 export function lineTotal(s: Snapshot): string {
   const b = s.agg?.totals
   if (!b) return NO_DATA
