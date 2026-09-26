@@ -104,6 +104,17 @@ describe("fmtPct", () => {
     assert.equal(fmtPct(0.9999), "100%")
     assert.equal(fmtPct(0.123456), "12.3%")
   })
+
+  test("dp 指定小数位（缓存命中用 2 位）", () => {
+    assert.equal(fmtPct(0.963945, 2), "96.39%")
+    assert.equal(fmtPct(0.985, 2), "98.50%") // 非整数固定两位，保留 0
+    assert.equal(fmtPct(0.975), "97.5%") // 默认仍是 1 位
+    // 整数值不带小数尾巴：0 / 100 / 恰好整数百分比都不显示 .00
+    assert.equal(fmtPct(0, 2), "0%")
+    assert.equal(fmtPct(1, 2), "100%")
+    assert.equal(fmtPct(0.97, 2), "97%")
+    assert.equal(fmtPct(NaN, 2), NO_DATA)
+  })
 })
 
 describe("fmtCost", () => {
@@ -230,7 +241,7 @@ describe("面板行", () => {
   })
 
   test("行文案包含四档用量、命中率、成功率与费用", () => {
-    assert.equal(lineSessionCounts(s, "s1"), "请求 5 · 成功 80% · 命中 96.4%")
+    assert.equal(lineSessionCounts(s, "s1"), "请求 5 · 成功 80% · 命中 96.39%")
     assert.equal(lineSessionMissRead(s, "s1"), "未命中 1.2K · 缓存读 56.8K")
     assert.equal(lineSessionWriteOut(s, "s1"), "缓存写 890 · 输出 1.5K")
     assert.equal(lineSessionReasonCost(s, "s1"), "推理 900 · 费用 ¥0.0234")
@@ -294,20 +305,37 @@ describe("本次命中率与环比", () => {
 
   test("首次请求没有基线：只显示命中率，不带符号", () => {
     const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI)] }) } })
-    assert.equal(lineSessionRecent(s, "s1"), "本次 97.5%")
+    assert.equal(lineSessionRecent(s, "s1"), "本次 97.50%")
   })
 
   test("上升带 +、下降带 -，不用箭头", () => {
     const up = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, LO)] }) } })
-    assert.equal(lineSessionRecent(up, "s1"), "本次 97.5% +1.9%")
+    assert.equal(lineSessionRecent(up, "s1"), "本次 97.50% +1.90%")
 
     const down = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, LO), at(100, HI)] }) } })
-    assert.equal(lineSessionRecent(down, "s1"), "本次 95.6% -1.9%")
+    assert.equal(lineSessionRecent(down, "s1"), "本次 95.60% -1.90%")
   })
 
   test("与上次持平不显示 +0%", () => {
     const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, HI)] }) } })
-    assert.equal(lineSessionRecent(s, "s1"), "本次 97.5%")
+    assert.equal(lineSessionRecent(s, "s1"), "本次 97.50%")
+  })
+
+  test("命中率取两位小数，一位小数会被抹平的差异能显示出来", () => {
+    // hitRate = cacheRead / (input + cacheRead + cacheWrite)
+    // A = 197/200 = 98.50%   B = 395/400 = 98.75%
+    // 一位小数下是 98.5% → 98.8%，看着像普通的 0.3 个百分点；
+    // 两位小数才能读出确切的 "+0.25%"
+    const A = { input: 3, cacheRead: 197, cacheWrite: 0 }
+    const B = { input: 5, cacheRead: 395, cacheWrite: 0 }
+    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, B), at(100, A)] }) } })
+    assert.equal(lineSessionRecent(s, "s1"), "本次 98.75% +0.25%")
+  })
+
+  test("整百分比不带小数尾巴，避免 97.00% 这种噪音", () => {
+    const FULL = { input: 0, cacheRead: 100, cacheWrite: 0 } // 100%
+    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, FULL)] }) } })
+    assert.equal(lineSessionRecent(s, "s1"), "本次 100%")
   })
 
   test("子树跨会话取全局最近两条，而不是各取各的", () => {
@@ -317,11 +345,11 @@ describe("本次命中率与环比", () => {
         child: sess({ session_id: "child", parent_id: "root", recent: [at(200, LO)] }),
       },
     })
-    // 正确取法：300 的 HI 与 200 的 LO → +1.9%
+    // 正确取法：300 的 HI 与 200 的 LO → +1.90%
     // 若退化成"只看 root 自己两条"，会得到两条 HI → 无符号
-    assert.equal(lineSessionRecent(s, "root"), "本次 97.5% +1.9%")
+    assert.equal(lineSessionRecent(s, "root"), "本次 97.50% +1.90%")
     // 子会话自己的子树只有一条，没有基线 → 不带符号
-    assert.equal(lineSessionRecent(s, "child"), "本次 95.6%")
+    assert.equal(lineSessionRecent(s, "child"), "本次 95.60%")
   })
 
   test("会话还没写过成功请求、或未见过该会话 → 占位", () => {

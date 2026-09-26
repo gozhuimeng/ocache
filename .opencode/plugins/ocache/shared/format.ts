@@ -52,11 +52,22 @@ export function fmtCount(n: number): string {
   return groupDigits(Math.round(n))
 }
 
-/** 比率（0~1）→ 百分比，保留一位小数并去掉多余的 ".0"。 */
-export function fmtPct(rate: number): string {
+/**
+ * 比率（0~1）→ 百分比。
+ *
+ * `dp` 决定小数位：**缓存命中率用 2 位**——token 量动辄百万级，一位小数会把
+ * 真实差异抹平（96.39% 与 96.44% 看着一样，实际差着几百次命中）；
+ * 成功率等用默认 1 位。
+ *
+ * **整数值不带小数尾巴**（`100.00%` → `100%`、`0.00%` → `0%`），
+ * 免得整数被写成 `97.00%` 这种噪音，也让"持平不显示符号"的判断继续成立。
+ */
+export function fmtPct(rate: number, dp = 1): string {
   if (!Number.isFinite(rate)) return NO_DATA
-  const text = (rate * 100).toFixed(1)
-  return (text.endsWith(".0") ? text.slice(0, -2) : text) + "%"
+  const text = (rate * 100).toFixed(dp)
+  const dot = text.indexOf(".")
+  if (dot >= 0 && Number(text.slice(dot + 1)) === 0) return text.slice(0, dot) + "%"
+  return text + "%"
 }
 
 /**
@@ -129,7 +140,7 @@ export function lineSessionCounts(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
   const b = sessionBucket(s, sid)
-  return `请求 ${fmtInt(b.steps)} · 成功 ${fmtPct(successRate(b))} · 命中 ${fmtPct(hitRate(b))}`
+  return `请求 ${fmtInt(b.steps)} · 成功 ${fmtPct(successRate(b))} · 命中 ${fmtPct(hitRate(b), 2)}`
 }
 
 /**
@@ -150,10 +161,12 @@ export function lineSessionRecent(s: Snapshot, sid: string): string {
   const [cur, prev] = subtreeRecentOf(s.sessions, sid)
   if (!cur) return NO_DATA
   const base = hitRate(cur)
-  let line = `本次 ${fmtPct(base)}`
+  // 命中率与环比都取两位小数：单次请求的命中差异常在零点几内，
+  // 一位小数会把 "+0.05%" 抹成 "0%"、让有效信息被当成持平吞掉。
+  let line = `本次 ${fmtPct(base, 2)}`
   if (prev) {
     const delta = base - hitRate(prev)
-    const text = fmtPct(Math.abs(delta))
+    const text = fmtPct(Math.abs(delta), 2)
     if (text !== "0%") line += ` ${delta > 0 ? "+" : "-"}${text}`
   }
   return line
