@@ -1,15 +1,12 @@
 import { test, describe } from "node:test"
 import assert from "node:assert/strict"
 import {
-  displayWidth,
   fmtCount,
   fmtInt,
   fmtCost,
   fmtPct,
-  truncate,
   NO_DATA,
   lineHeader,
-  lineSessionMeta,
   lineSessionCounts,
   lineSessionMissRead,
   lineSessionWriteOut,
@@ -126,23 +123,6 @@ describe("fmtCost", () => {
   })
 })
 
-describe("truncate / displayWidth", () => {
-  test("够短原样返回，超长截断加省略号", () => {
-    assert.equal(truncate("  GGG  ", 22), "GGG")
-    assert.equal(truncate("abcdef", 4), "abc…")
-    assert.equal(truncate("abcd", 4), "abcd")
-  })
-
-  test("按终端显示格截断：中文占 2 格", () => {
-    assert.equal(displayWidth("ab"), 2)
-    assert.equal(displayWidth("中文"), 4)
-    assert.equal(displayWidth("中文ab"), 6)
-    // 6 格预算里先留 1 格给省略号 → 只放得下 2 个汉字
-    assert.equal(truncate("中文标题测试", 6), "中文…")
-    assert.equal(truncate("中文标题测试", 12), "中文标题测试")
-  })
-})
-
 describe("会话子树（M5：子会话聚合到父会话）", () => {
   const sessions = {
     root: sess({ session_id: "root", steps: 2, ok: 2, input: 100, cache_read: 900 }),
@@ -225,16 +205,21 @@ describe("面板行", () => {
   }
   const s = snap({ sessions })
 
-  test("标题行：无子会话只有面板名，有子会话注明聚合范围", () => {
-    const solo = snap({ sessions: { x: sess({ session_id: "x" }) } })
-    assert.equal(lineHeader(solo, "x"), "Token 用量")
-    assert.equal(lineHeader(s, "s1"), "Token 用量 +1 子会话")
-    // 会话还没数据时同样只显示面板名，具体行各自退 "—"
-    assert.equal(lineHeader(s, "未见过"), "Token 用量")
+  test("标题行：面板名 + 聚合范围 + 记录状态", () => {
+    // 快照未到（updated=0）时不显示状态，避免闪一句"仅内存"
+    assert.equal(lineHeader(emptySnapshot("¥"), "x"), "Token 用量")
+    const solo = snap({ updated: 1, record: true, sessions: { x: sess({ session_id: "x" }) } })
+    assert.equal(lineHeader(solo, "x"), "Token 用量 · ● 记录中")
+    // s 是首帧之前的快照（updated=0），补上更新时间才会有状态尾巴
+    assert.equal(lineHeader({ ...s, updated: 1 }, "s1"), "Token 用量 +1 子会话 · ○ 仅内存")
+    // 会话还没数据时同样只报聚合范围，具体行各自退 "—"
+    assert.equal(
+      lineHeader(snap({ updated: 1, record: true }), "未见过"),
+      "Token 用量 · ● 记录中",
+    )
   })
 
   test("无数据的会话每行给占位而不是一串 0", () => {
-    assert.equal(lineSessionMeta(s, "未见过"), NO_DATA)
     assert.equal(lineSessionCounts(s, "未见过"), NO_DATA)
     assert.equal(lineSessionMissRead(s, "未见过"), NO_DATA)
     assert.equal(lineSessionWriteOut(s, "未见过"), NO_DATA)
@@ -242,7 +227,6 @@ describe("面板行", () => {
   })
 
   test("行文案包含四档用量、命中率、成功率与费用", () => {
-    assert.equal(lineSessionMeta(s, "s1"), "build · mimo-v2.6-flash-free")
     assert.equal(lineSessionCounts(s, "s1"), "请求 5 · 成功 80% · 命中 96.4%")
     assert.equal(lineSessionMissRead(s, "s1"), "未命中 1.2K · 缓存读 56.8K")
     assert.equal(lineSessionWriteOut(s, "s1"), "缓存写 890 · 输出 1.5K")

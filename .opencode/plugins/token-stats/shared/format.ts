@@ -18,49 +18,6 @@ import {
 /** 没有数据时统一显示的占位。 */
 export const NO_DATA = "—"
 
-/** 模型行的截断宽度，单位是终端显示格（中文/日文占 2 格）。 */
-const META_WIDTH = 30
-
-/** 单个码点的显示宽度：CJK、全角、谚文按 2 格算，其余 1 格。 */
-function charWidth(code: number): number {
-  if (code >= 0x1100 && code <= 0x115f) return 2 // Hangul Jamo
-  if (code >= 0x2e80 && code <= 0x303e) return 2 // CJK 部首、康熙部首、CJK 符号
-  if (code >= 0x3041 && code <= 0x33ff) return 2 // 假名、注音、兼容 CJK
-  if (code >= 0x3400 && code <= 0x4dbf) return 2 // CJK 扩展 A
-  if (code >= 0x4e00 && code <= 0x9fff) return 2 // CJK 统一汉字
-  if (code >= 0xa000 && code <= 0xa4cf) return 2 // 彝文
-  if (code >= 0xac00 && code <= 0xd7a3) return 2 // 谚文音节
-  if (code >= 0xf900 && code <= 0xfaff) return 2 // CJK 兼容汉字
-  if (code >= 0xfe30 && code <= 0xfe6f) return 2 // CJK 兼容形式
-  if (code >= 0xff00 && code <= 0xff60) return 2 // 全角 ASCII
-  if (code >= 0xffe0 && code <= 0xffe6) return 2 // 全角符号
-  if (code >= 0x20000 && code <= 0x3fffd) return 2 // CJK 扩展 B+
-  return 1
-}
-
-/** 字符串占用的终端格数。按 JS length 截断会把中文行裁掉一半。 */
-export function displayWidth(text: string): number {
-  let w = 0
-  for (const ch of text) w += charWidth(ch.codePointAt(0) ?? 0)
-  return w
-}
-
-/** 按显示格数截断：够宽原样返回，超宽截到 width-1 格再补省略号（省略号占 1 格）。 */
-export function truncate(text: string, width: number): string {
-  const s = text.trim()
-  if (displayWidth(s) <= width) return s
-  const budget = Math.max(0, width - 1)
-  let out = ""
-  let used = 0
-  for (const ch of s) {
-    const w = charWidth(ch.codePointAt(0) ?? 0)
-    if (used + w > budget) break
-    out += ch
-    used += w
-  }
-  return `${out}…`
-}
-
 /** 千分位分组（不用 toLocaleString，避免环境 locale 影响测试结果）。 */
 function groupDigits(n: number): string {
   return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",")
@@ -147,27 +104,24 @@ export function sessionBucket(s: Snapshot, sid: string): Bucket {
 }
 
 /**
- * 第 1 行：面板标题。
+ * 第 1 行：面板标题 + 聚合范围 + 记录状态。
  *
  * 不再重复显示会话标题——侧栏顶部本来就有，且侧栏窄、中文标题按格截断后
  * 常常只剩半句。这里只在存在子会话时补一句聚合范围，说明"下面的数字把
  * 子代理也算进来了"。
+ *
+ * 记录状态必须常驻：`record` 关闭时 JSONL 一个字节都不写，数据只活在
+ * 内存里、重启即失。不说清楚的话，用户会以为历史已经存下来了。
+ * 首帧快照还没到（updated=0）时不显示状态，免得闪一句"仅内存"误导人。
  */
 export function lineHeader(s: Snapshot, sid: string): string {
   const kids = Math.max(0, subtreeIds(s.sessions, sid).length - 1)
-  return kids > 0 ? `Token 用量 +${kids} 子会话` : "Token 用量"
+  const scope = kids > 0 ? ` +${kids} 子会话` : ""
+  const state = s.updated === 0 ? "" : s.record ? " · ● 记录中" : " · ○ 仅内存"
+  return `Token 用量${scope}${state}`
 }
 
-/** 第 2 行：agent · 模型。 */
-export function lineSessionMeta(s: Snapshot, sid: string): string {
-  const own = s.sessions[sid]
-  if (!own) return NO_DATA
-  const model = own.model_name ?? own.model_id ?? null
-  const parts = [own.agent || null, model].filter((x): x is string => !!x && x.length > 0)
-  return parts.length > 0 ? truncate(parts.join(" · "), META_WIDTH) : NO_DATA
-}
-
-/** 第 4 行：请求数 · 请求成功率 · 缓存命中率（当前会话含子会话）。 */
+/** 第 2 行：请求数 · 请求成功率 · 缓存命中率（当前会话含子会话）。 */
 export function lineSessionCounts(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -175,7 +129,7 @@ export function lineSessionCounts(s: Snapshot, sid: string): string {
   return `请求 ${fmtInt(b.steps)} · 成功 ${fmtPct(successRate(b))} · 命中 ${fmtPct(hitRate(b))}`
 }
 
-/** 第 5 行：输入未命中 · 缓存读。 */
+/** 第 3 行：输入未命中 · 缓存读。 */
 export function lineSessionMissRead(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -183,7 +137,7 @@ export function lineSessionMissRead(s: Snapshot, sid: string): string {
   return `未命中 ${fmtCount(b.input)} · 缓存读 ${fmtCount(b.cacheRead)}`
 }
 
-/** 第 6 行：缓存写 · 输出。 */
+/** 第 4 行：缓存写 · 输出。 */
 export function lineSessionWriteOut(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -191,7 +145,7 @@ export function lineSessionWriteOut(s: Snapshot, sid: string): string {
   return `缓存写 ${fmtCount(b.cacheWrite)} · 输出 ${fmtCount(b.output)}`
 }
 
-/** 第 7 行：推理 · 费用。 */
+/** 第 5 行：推理 · 费用。 */
 export function lineSessionReasonCost(s: Snapshot, sid: string): string {
   const own = s.sessions[sid]
   if (!own) return NO_DATA
@@ -199,21 +153,21 @@ export function lineSessionReasonCost(s: Snapshot, sid: string): string {
   return `推理 ${fmtCount(b.reasoning)} · 费用 ${fmtCost(b.cost, s.currency)}`
 }
 
-/** 第 9 行：今日。 */
+/** 第 7 行：今日。 */
 export function lineToday(s: Snapshot): string {
   const b = s.agg?.today
   if (!b) return NO_DATA
   return `今日 ${fmtCost(b.cost, s.currency)} · ${fmtPct(successRate(b))} 成功`
 }
 
-/** 第 10 行：本月。 */
+/** 第 8 行：本月。 */
 export function lineMonth(s: Snapshot): string {
   const b = s.agg?.month
   if (!b) return NO_DATA
   return `本月 ${fmtCost(b.cost, s.currency)} · ${fmtPct(successRate(b))} 成功`
 }
 
-/** 第 11 行：历史累计（请求数 + 成功率）。 */
+/** 第 9 行：历史累计（请求数 + 成功率）。 */
 export function lineTotal(s: Snapshot): string {
   const b = s.agg?.totals
   if (!b) return NO_DATA
