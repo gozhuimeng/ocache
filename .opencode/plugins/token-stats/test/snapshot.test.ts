@@ -8,9 +8,10 @@ import {
   writeAggregate,
   readAggregate,
   snapshotPath,
+  selectSessions,
   SNAPSHOT_SCHEMA,
 } from "../shared/snapshot.ts"
-import { emptyAggregates, record, snapshotOf } from "../shared/aggregate.ts"
+import { emptyAggregates, emptyBucket, record, snapshotOf } from "../shared/aggregate.ts"
 import type { Snapshot } from "../shared/snapshot.ts"
 
 let root = ""
@@ -29,7 +30,8 @@ const snap: Snapshot = {
   updated: 1,
   record: true,
   currency: "¥",
-  session: null,
+  last_session_id: null,
+  sessions: {},
   agg: null,
 }
 
@@ -105,5 +107,61 @@ describe("aggregate 持久化", () => {
     await mkdir(dir, { recursive: true })
     await writeFile(path.join(dir, ".aggregate.json"), "not json", "utf8")
     assert.equal(await readAggregate(dir), null)
+  })
+})
+
+describe("selectSessions", () => {
+  const bucket = (last_ts: number, parent_id: string | null = null) => ({
+    ...emptyBucket(),
+    last_ts,
+    parent_id,
+    title: "t",
+    provider_id: "p",
+    model_id: "m",
+    model_name: "M",
+    variant: null,
+    agent: "build",
+  })
+
+  test("字段按 snake_case 平铺，货币标签统一填入", () => {
+    const got = selectSessions({ ses_a: bucket(100) }, "¥")
+    assert.deepEqual(got.ses_a, {
+      session_id: "ses_a",
+      session_title: "t",
+      parent_id: null,
+      last_ts: 100,
+      steps: 0,
+      ok: 0,
+      error: 0,
+      input: 0,
+      cache_read: 0,
+      cache_write: 0,
+      output: 0,
+      reasoning: 0,
+      cost: 0,
+      currency: "¥",
+      provider_id: "p",
+      model_id: "m",
+      model_name: "M",
+      variant: null,
+      agent: "build",
+    })
+  })
+
+  test("按 last_ts 倒序截断到上限", () => {
+    const sessions = {
+      ses_old: bucket(1),
+      ses_new: bucket(9),
+      ses_mid: bucket(5),
+      ses_new2: bucket(9), // 同秒，按 id 稳定排序
+    }
+    const got = selectSessions(sessions, "$", 2)
+    const ids = Object.keys(got)
+    assert.equal(ids.length, 2)
+    assert.deepEqual(ids.sort(), ["ses_new", "ses_new2"])
+  })
+
+  test("空桶返回空对象", () => {
+    assert.deepEqual(selectSessions({}, "$"), {})
   })
 })

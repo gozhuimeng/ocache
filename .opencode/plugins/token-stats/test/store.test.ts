@@ -1,8 +1,8 @@
 import { test, describe, before, after } from "node:test"
 import assert from "node:assert/strict"
-import { mkdtemp, mkdir, readFile, readdir, rm, appendFile, writeFile, stat } from "node:fs/promises"
+import { mkdtemp, mkdir, readFile, readdir, rm, appendFile, writeFile, stat, utimes } from "node:fs/promises"
 import path from "node:path"
-import { JsonlStore, readSince } from "../shared/store.ts"
+import { JsonlStore, readSince, pruneOldMonths } from "../shared/store.ts"
 import { STEP_TYPE, SCHEMA_VERSION, type StepRow } from "../shared/schema.ts"
 
 let root = ""
@@ -125,6 +125,56 @@ describe("JsonlStore 写侧", () => {
     const ls = await lines(path.join(dir, "2026-09", "ses_a.jsonl"))
     assert.equal(ls.filter((l) => JSON.parse(l).type === "meta").length, 1)
     assert.equal(ls.length, 3)
+  })
+
+  test("onAppend 回报文件绝对大小（含 meta 头），可直接用作读游标", async () => {
+    const sizes: Array<[string, number]> = []
+    const dir = path.join(root, "cursor")
+    const store = new JsonlStore({
+      baseDir: dir,
+      record: true,
+      onAppend: (key, size) => sizes.push([key, size]),
+    })
+    store.push("ses_a", "2026-09", JSON.stringify(row("ses_a", 1)))
+    await store.flushAll()
+    assert.deepEqual(sizes.map((s) => s[0]), ["2026-09/ses_a.jsonl"])
+    const file = path.join(dir, "2026-09", "ses_a.jsonl")
+    assert.equal(sizes[0]![1], (await stat(file)).size)
+
+    // 二次 flush：大小累加，且与真实文件一致
+    store.push("ses_a", "2026-09", JSON.stringify(row("ses_a", 2)))
+    await store.flushAll()
+    assert.equal(sizes.at(-1)![1], (await stat(file)).size)
+
+    // 该大小作为游标，readSince 不再重复读出任何行
+    const res = await readSince(dir, { "2026-09/ses_a.jsonl": sizes.at(-1)![1] })
+    assert.equal(res.rows.length, 0)
+  })
+
+  test("flushSync：exit 路径同步落盘并回报游标", async () => {
+    const dir = path.join(root, "sync")
+    const sizes: number[] = []
+    const store = new JsonlStore({
+      baseDir: dir,
+      record: true,
+      onAppend: (_k, size) => sizes.push(size),
+    })
+    store.push("ses_a", "2026-09", JSON.stringify(row("ses_a", 1)))
+    assert.equal(store.pending().rows, 1)
+    store.flushSync()
+    assert.deepEqual(store.pending(), { sessions: 0, rows: 0, bytes: 0 })
+    const file = path.join(dir, "2026-09", "ses_a.jsonl")
+    assert.equal(sizes.at(-1), (await stat(file)).size)
+    const ls = await lines(file)
+    assert.equal(ls.length, 2) // meta + 1 行
+  })
+
+  test("flushSync 在 record=false 时不落盘", async () => {
+    const dir = path.join(root, "sync-off")
+    const store = new JsonlStore({ baseDir: dir, record: false })
+    store.push("ses_a", "2026-09", JSON.stringify(row("ses_a", 1)))
+    store.flushSync()
+    await assert.rejects(() => readdir(dir))
   })
 })
 
@@ -269,5 +319,35 @@ describe("readSince 增量同步", () => {
     await rm(path.join(dir, "2026-09"), { recursive: true })
     const second = await readSince(dir, first.cursors)
     assert.deepEqual(second.cursors, {})
+  })
+})
+
+describe("pruneOldMonths", () => {
+  test("retentionDays=0 时不清理（默认数据自主）", async () => {
+    const { dir, store } = tmpStore()
+    store.push("ses_a", "2026-09", JSON.stringify(row("ses_a", 1)))
+    await store.flushAll()
+    assert.deepEqual(pruneOldMonths(dir, 0), [])
+    assert.deepEqual(await readdir(dir), ["2026-09"])
+  })
+
+  test("只删超期且文件确实陈旧的月份目录", async () => {
+    const { dir, store } = tmpStore()
+    store.push("ses_a", "2020-01", JSON.stringify(row("ses_a", 1)))
+    store.push("ses_b", "2026-09", JSON.stringify(row("ses_b", 1)))
+    await store.flushAll()
+
+    // 把 2020-01 的文件 mtime 改到 400 天前，2026-09 保持"刚写入"
+    const old = path.join(dir, "2020-01", "ses_a.jsonl")
+    const long_ago = new Date(Date.now() - 400 * 86_400_000)
+    await utimes(old, long_ago, long_ago)
+
+    const removed = pruneOldMonths(dir, 180)
+    assert.deepEqual(removed, ["2020-01"])
+    assert.deepEqual(await readdir(dir), ["2026-09"])
+  })
+
+  test("目录不存在不抛异常", () => {
+    assert.deepEqual(pruneOldMonths(path.join(root, "no-such-dir"), 30), [])
   })
 })

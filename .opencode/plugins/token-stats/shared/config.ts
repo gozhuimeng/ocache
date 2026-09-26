@@ -32,15 +32,17 @@ const PRICE_KEYS: ReadonlyArray<keyof Price> = ["input", "cacheRead", "cacheWrit
 export const DEFAULT_CONFIG: PluginConfig = {
   record: true,
   currency: "$",
-  useModelPrice: false,
+  useModelPrice: true,
   prices: {},
   flushAgeMs: 30_000,
   flushRows: 100,
   flushBytes: 64 * 1024,
   memoryCapBytes: 5 * 1024 * 1024,
   persistMs: 30_000,
-  snapshotMs: 1_000,
-  retentionDays: 180,
+  snapshotMs: 250,
+  /** 默认不清理：数据自主是本项目的价值主张，磁盘成本远低于历史被抹掉的代价。
+   *  显式开启后，被删月份的行会从文件里消失，全量重建时历史合计会相应缩小。 */
+  retentionDays: 0,
 }
 
 function num(v: unknown, fallback: number, min = 0): number {
@@ -55,7 +57,26 @@ function str(v: unknown, fallback: string): string {
   return typeof v === "string" && v.length > 0 && v.length <= 32 ? v : fallback
 }
 
-/** 解析 options 对象；任何异常路径都返回默认配置。 */
+/**
+ * 行内 `currency` 的实际标签。
+ * 四档全部来自模型价时就是美元（模型价本身以 USD 计），标成别的货币是错的；
+ * 只要有一档用了自定义价，就用用户配置的标签。
+ */
+export function effectiveCurrency(cfg: PluginConfig): string {
+  if (cfg.useModelPrice) return "$"
+  const hasCustom = PRICE_KEYS.some((k) => typeof cfg.prices[k] === "number")
+  return hasCustom ? cfg.currency : "$"
+}
+
+/**
+ * 解析 options 对象；任何异常路径都返回默认配置。
+ *
+ * 价格来源（D3）：
+ * - 显式 `useModelPrice: true`  → 四档全用模型自带美元价，忽略 prices
+ * - 显式 `useModelPrice: false` → 逐档用 prices，缺省/null 回落模型价
+ * - 未设置                      → 配了任何 prices 则视为要自定义，
+ *                                  否则读模型价（"默认读模型自带 cost"）
+ */
 export function parseConfig(options: unknown): PluginConfig {
   const o = (typeof options === "object" && options !== null ? options : {}) as Record<string, unknown>
   const raw = typeof o.prices === "object" && o.prices !== null ? (o.prices as Record<string, unknown>) : {}
@@ -66,10 +87,13 @@ export function parseConfig(options: unknown): PluginConfig {
     if (v === null) prices[key] = null
     else if (typeof v === "number" && Number.isFinite(v) && v >= 0) prices[key] = v
   }
+  const hasCustomPrice = PRICE_KEYS.some((k) => typeof prices[k] === "number")
+  const useModelPrice =
+    typeof o.useModelPrice === "boolean" ? o.useModelPrice : !hasCustomPrice
   return {
     record: bool(o.record, DEFAULT_CONFIG.record),
     currency: str(o.currency, DEFAULT_CONFIG.currency),
-    useModelPrice: bool(o.useModelPrice, DEFAULT_CONFIG.useModelPrice),
+    useModelPrice,
     prices,
     flushAgeMs: num(o.flushAgeMs, DEFAULT_CONFIG.flushAgeMs, 1),
     flushRows: num(o.flushRows, DEFAULT_CONFIG.flushRows, 1),

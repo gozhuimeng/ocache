@@ -20,20 +20,28 @@ import {
 } from "./schema.ts"
 import { computeCost, type ModelPrice } from "./billing.ts"
 
-/** Model.Cost 数组元素（@opencode/schema：cost 是数组，每项可带 context tier）。 */
-export interface ModelCostEntry extends ModelPrice {
+/**
+ * Model.Cost 数组元素。字段形状以 @opencode/schema 的 Model.Cost 为准：
+ * `cache: { read, write }`（不是 cacheRead/cacheWrite），可选 `tier`。
+ */
+export interface ModelCostEntry {
+  readonly input: number
+  readonly output: number
+  readonly cache: { readonly read: number; readonly write: number }
   readonly tier?: { readonly type: "context"; readonly size: number }
 }
 
 /**
- * 从 Model.Cost 数组挑一档。
+ * 从 Model.Cost 数组挑一档并转成计费用的四档价。
  * 优先无 tier 的基础价；只有分档价时取第一档。
  * tier 依赖会话上下文长度，此处不做推断——需要精确值请用 options.prices 覆盖（D3）。
  */
-export function pickModelCost(costs: readonly ModelCostEntry[] | undefined): ModelCostEntry | undefined {
+export function pickModelCost(costs: readonly ModelCostEntry[] | undefined): ModelPrice | undefined {
   if (!Array.isArray(costs) || costs.length === 0) return undefined
-  const base = costs.find((c) => c.tier === undefined)
-  return base ?? costs[0]
+  const chosen = costs.find((c) => c.tier === undefined) ?? costs[0]
+  if (!chosen) return undefined
+  const n = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0)
+  return { input: n(chosen.input), output: n(chosen.output), cacheRead: n(chosen.cache?.read), cacheWrite: n(chosen.cache?.write) }
 }
 
 export interface SessionMeta {

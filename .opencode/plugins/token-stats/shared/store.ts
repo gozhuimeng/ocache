@@ -9,7 +9,7 @@
  * 本模块不依赖 OpenCode，可单独测试。
  */
 
-import { createReadStream } from "node:fs"
+import { appendFileSync, createReadStream, mkdirSync, readdirSync, rmSync, statSync } from "node:fs"
 import { appendFile, mkdir, readdir, stat } from "node:fs/promises"
 import path from "node:path"
 import { META_TYPE, SCHEMA_VERSION, isStepRow, type StepRow } from "./schema.ts"
@@ -27,6 +27,13 @@ export interface StoreOptions {
   /** 注入时钟，便于测试驻留时间触发。 */
   readonly now?: () => number
   readonly onError?: (err: unknown, where: string) => void
+  /**
+   * 追加成功后回调该文件的**绝对大小**（字节）。
+   * 调用方据此回填读游标——用 stat 而非"上次游标 + 本次字节"，
+   * 是为了容忍崩溃留下的半行：那些字节已进文件但不属任何完整行，
+   * 以绝对大小为准才不会让下次同步重复读到已计入的行。
+   */
+  readonly onAppend?: (fileKey: string, sizeAfter: number) => void
 }
 
 interface Buf {
@@ -59,6 +66,7 @@ export class JsonlStore {
   private readonly currency: string
   private readonly now: () => number
   private readonly onError: (err: unknown, where: string) => void
+  private readonly onAppend: ((fileKey: string, sizeAfter: number) => void) | undefined
 
   private readonly bufs = new Map<string, Buf>()
   /** session → 归档目录：首次写入固定，跨月/跨重启不变（种子见 readSince）。 */
@@ -80,11 +88,17 @@ export class JsonlStore {
     this.currency = opts.currency ?? DEFAULTS.currency
     this.now = opts.now ?? Date.now
     this.onError = opts.onError ?? (() => {})
+    this.onAppend = opts.onAppend
   }
 
   /** 由 readSince 的结果喂入，让重启后同一 session 仍写回原文件。 */
   rememberDir(sessionID: string, monthDir: string): void {
     if (!this.dirs.has(sessionID)) this.dirs.set(sessionID, monthDir)
+  }
+
+  /** 当前进程已知的 session → 归档目录，随聚合缓存一起持久化。 */
+  dirsSnapshot(): Record<string, string> {
+    return Object.fromEntries(this.dirs)
   }
 
   /** 追加一行（传入已序列化的 JSON，不含换行）。 */
@@ -149,6 +163,7 @@ export class JsonlStore {
     if (b.lines.length === 0) return Promise.resolve()
 
     const file = path.join(this.baseDir, b.monthDir, `${sessionID}.jsonl`)
+    const fileKey = `${b.monthDir}/${sessionID}.jsonl`
     const prev = this.chains.get(file) ?? Promise.resolve()
     const next = prev.catch(() => {}).then(async () => {
       try {
@@ -157,6 +172,7 @@ export class JsonlStore {
         if (!this.known.has(file) && (await needMeta(file))) payload = `${this.meta()}\n${payload}`
         await appendFile(file, payload, "utf8")
         this.known.add(file)
+        this.reportAppend(file, fileKey)
       } catch (err) {
         this.restore(b, err)
       }
@@ -177,6 +193,44 @@ export class JsonlStore {
       price_tag: this.currency,
       created: this.now(),
     })
+  }
+
+  /** stat 失败只记日志：游标晚一拍不要紧，下次同步会用 size<cursor 判断补正。 */
+  private reportAppend(file: string, fileKey: string): void {
+    if (!this.onAppend) return
+    try {
+      this.onAppend(fileKey, statSync(file).size)
+    } catch (err) {
+      this.onError(err, `stat:${fileKey}`)
+    }
+  }
+
+  /**
+   * 进程 `exit` 钩子专用：同步落盘所有缓冲。
+   * 异步通道在此不可用，失败直接记日志放弃（尽力而为，不抛）。
+   */
+  flushSync(): void {
+    if (!this.record) return
+    for (const b of [...this.bufs.values()]) {
+      if (b.lines.length === 0) continue
+      const file = path.join(this.baseDir, b.monthDir, `${b.sessionID}.jsonl`)
+      const fileKey = `${b.monthDir}/${b.sessionID}.jsonl`
+      try {
+        mkdirSync(path.dirname(file), { recursive: true })
+        let payload = b.lines.join("")
+        if (!this.known.has(file) && !fileNonEmpty(file)) payload = `${this.meta()}\n${payload}`
+        appendFileSync(file, payload, "utf8")
+        this.known.add(file)
+        this.bufs.delete(b.sessionID)
+        this.totalBytes -= b.bytes
+        this.reportAppend(file, fileKey)
+      } catch (err) {
+        // 同步路径无法重试，直接上报并丢弃该批（避免 exit 时无限循环）
+        this.bufs.delete(b.sessionID)
+        this.totalBytes -= b.bytes
+        this.onError(err, `flushSync:${b.sessionID}`)
+      }
+    }
   }
 
   private track(p: Promise<void>): void {
@@ -220,6 +274,58 @@ async function needMeta(file: string): Promise<boolean> {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return true
     throw err
   }
+}
+
+/** needMeta 的同步版，仅供 flushSync 使用。 */
+function fileNonEmpty(file: string): boolean {
+  try {
+    return statSync(file).size > 0
+  } catch {
+    return false
+  }
+}
+
+const DAY_MS = 86_400_000
+
+/**
+ * 删除超出保留期的月份目录（REQUIREMENTS §5.1 可选项）。
+ * 默认 retentionDays=0 即不清理——数据自主是本项目的价值主张。
+ * 开启后，被删月份的行不再存在于文件中，全量重建时历史合计会相应缩小。
+ * 同步实现，只在进程启动时调用一次；删除失败仅记日志。
+ */
+export function pruneOldMonths(
+  baseDir: string,
+  retentionDays: number,
+  now: number = Date.now(),
+  onError?: (err: unknown, where: string) => void,
+): string[] {
+  if (retentionDays <= 0) return []
+  const cutoff = now - retentionDays * DAY_MS
+  const removed: string[] = []
+  let entries: string[]
+  try {
+    entries = readdirSync(baseDir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") onError?.(err, "prune:readdir")
+    return removed
+  }
+  for (const name of entries) {
+    if (!MONTH_DIR.test(name)) continue
+    const dir = path.join(baseDir, name)
+    try {
+      // 目录 mtime 取其中最新文件的修改时间，避免刚写入的旧归档被误删
+      const newest = Math.max(
+        0,
+        ...readdirSync(dir).map((f) => statSync(path.join(dir, f)).mtimeMs),
+      )
+      if (newest >= cutoff) continue
+      rmSync(dir, { recursive: true, force: true })
+      removed.push(name)
+    } catch (err) {
+      onError?.(err, `prune:${name}`)
+    }
+  }
+  return removed
 }
 
 export interface SyncResult {

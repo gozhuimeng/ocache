@@ -1,7 +1,7 @@
 import { test, describe } from "node:test"
 import assert from "node:assert/strict"
 import { buildRow, pickModelCost, rowTokens, rowMonth } from "../shared/row.ts"
-import { parseConfig, DEFAULT_CONFIG } from "../shared/config.ts"
+import { parseConfig, DEFAULT_CONFIG, effectiveCurrency } from "../shared/config.ts"
 import { computeCost } from "../shared/billing.ts"
 
 const session = {
@@ -100,26 +100,32 @@ describe("pickModelCost", () => {
   const cost = (tier?: { type: "context"; size: number }) => ({
     input: 3,
     output: 15,
-    cacheRead: 0.3,
-    cacheWrite: 3.75,
+    cache: { read: 0.3, write: 3.75 },
     ...(tier ? { tier } : {}),
   })
 
-  test("优先无 tier 的基础价", () => {
+  test("优先无 tier 的基础价并转成四档计价", () => {
     const got = pickModelCost([cost({ type: "context", size: 200_000 }), cost()])
-    assert.equal(got?.input, 3)
-    assert.equal(got?.tier, undefined)
+    assert.deepEqual(got, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 })
   })
 
   test("只有分档价时取第一档", () => {
     const got = pickModelCost([cost({ type: "context", size: 200_000 })])
-    assert.equal(got?.tier?.size, 200_000)
+    assert.deepEqual(got, { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 })
+  })
+
+  test("cache 缺失或非法值归零，不产生 NaN", () => {
+    const got = pickModelCost([{ input: 1, output: 2, cache: { read: Number.NaN, write: -1 } as never }])
+    assert.deepEqual(got, { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 })
   })
 
   test("空数组与缺省返回 undefined（由 resolvePrice 兜底为 0）", () => {
     assert.equal(pickModelCost([]), undefined)
     assert.equal(pickModelCost(undefined), undefined)
-    assert.equal(pickModelCost(undefined as never), undefined)
+  })
+
+  test("畸形条目按 0 归一，不产生 NaN", () => {
+    assert.deepEqual(pickModelCost([{}] as never), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
   })
 })
 
@@ -163,5 +169,27 @@ describe("parseConfig", () => {
     assert.equal(parseConfig({ currency: "" }).currency, "$")
     assert.equal(parseConfig({ currency: "x".repeat(64) }).currency, "$")
     assert.equal(parseConfig({ currency: 123 }).currency, "$")
+  })
+
+  test("D3：默认读模型自带价，配了 prices 才切自定义", () => {
+    assert.equal(parseConfig({}).useModelPrice, true, "完全无配置 → 读模型价")
+    assert.equal(parseConfig({ currency: "¥" }).useModelPrice, true, "只改标签 → 仍读模型价")
+    assert.equal(parseConfig({ prices: { input: 2 } }).useModelPrice, false, "配了价 → 自定义")
+    assert.equal(parseConfig({ prices: { input: null } }).useModelPrice, true, "只有 null 回落声明 → 模型价")
+    assert.equal(parseConfig({ prices: { bogus: 1 } }).useModelPrice, true, "非法价被丢弃后 → 模型价")
+    assert.equal(parseConfig({ useModelPrice: false, prices: {} }).useModelPrice, false, "显式 false 保留")
+    assert.equal(
+      parseConfig({ useModelPrice: true, prices: { input: 2 } }).useModelPrice,
+      true,
+      "显式 true 覆盖已配的价",
+    )
+  })
+
+  test("effectiveCurrency：全模型价 → $，有自定义价 → 用配置标签", () => {
+    assert.equal(effectiveCurrency(parseConfig({})), "$")
+    assert.equal(effectiveCurrency(parseConfig({ useModelPrice: true, currency: "¥", prices: { input: 2 } })), "$")
+    assert.equal(effectiveCurrency(parseConfig({ currency: "¥", prices: { input: 2 } })), "¥")
+    assert.equal(effectiveCurrency(parseConfig({ currency: "¥", prices: { input: null } })), "$")
+    assert.equal(effectiveCurrency(parseConfig({ currency: "credits", prices: { output: 8 } })), "credits")
   })
 })

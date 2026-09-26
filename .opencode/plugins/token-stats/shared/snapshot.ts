@@ -10,10 +10,13 @@ import path from "node:path"
 import { randomBytes } from "node:crypto"
 import type { Aggregates } from "./aggregate.ts"
 
-/** 当前会话的实时块（服务端每步更新）。 */
+/** 会话实时块（服务端每步更新；含子会话行以便展示期聚合）。 */
 export interface SessionSnapshot {
   readonly session_id: string
   readonly session_title: string | null
+  readonly parent_id: string | null
+  /** 最近一次写入的时间戳，供 TUI 判定"当前会话"与排序。 */
+  readonly last_ts: number
   readonly steps: number
   readonly ok: number
   readonly error: number
@@ -28,14 +31,21 @@ export interface SessionSnapshot {
   readonly model_id: string | null
   readonly model_name: string | null
   readonly variant: string | null
+  readonly agent: string | null
 }
+
+/** 快照里保留的会话块数量上限（按 last_ts 倒序），控制快照体积。 */
+export const SESSIONS_IN_SNAPSHOT = 50
 
 export interface Snapshot {
   readonly schema: number
   readonly updated: number
   readonly record: boolean
   readonly currency: string
-  readonly session: SessionSnapshot | null
+  /** 最近活跃的 sessionID；TUI 拿不到自身会话时用它兜底。 */
+  readonly last_session_id: string | null
+  /** sessionID → 会话块，按最近活跃保留前 N 个。 */
+  readonly sessions: Record<string, SessionSnapshot>
   /** 聚合三口径（今日/本月/全部），由 snapshotOf() 产出。 */
   readonly agg: ReturnType<typeof import("./aggregate.ts").snapshotOf> | null
 }
@@ -123,4 +133,43 @@ export async function readAggregate(baseDir: string): Promise<AggregateFile | nu
   } catch {
     return null
   }
+}
+
+/**
+ * 从聚合桶挑出会话块并截断到上限（按 last_ts 倒序）。
+ * 抽成纯函数是为了让"选哪些会话进快照"可脱离 OpenCode 单测。
+ */
+export function selectSessions(
+  sessions: Record<string, import("./aggregate.ts").SessionBucket>,
+  currency: string,
+  limit: number = SESSIONS_IN_SNAPSHOT,
+): Record<string, SessionSnapshot> {
+  const out: Record<string, SessionSnapshot> = {}
+  const entries = Object.entries(sessions)
+    .sort((a, b) => b[1].last_ts - a[1].last_ts || (a[0] < b[0] ? -1 : 1))
+    .slice(0, limit)
+  for (const [id, b] of entries) {
+    out[id] = {
+      session_id: id,
+      session_title: b.title,
+      parent_id: b.parent_id,
+      last_ts: b.last_ts,
+      steps: b.steps,
+      ok: b.ok,
+      error: b.error,
+      input: b.input,
+      cache_read: b.cacheRead,
+      cache_write: b.cacheWrite,
+      output: b.output,
+      reasoning: b.reasoning,
+      cost: b.cost,
+      currency,
+      provider_id: b.provider_id || null,
+      model_id: b.model_id || null,
+      model_name: b.model_name,
+      variant: b.variant,
+      agent: b.agent || null,
+    }
+  }
+  return out
 }
