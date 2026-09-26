@@ -9,6 +9,8 @@ import {
   readAggregate,
   snapshotPath,
   selectSessions,
+  selectedSessionIds,
+  subtreeBucketOf,
   SNAPSHOT_SCHEMA,
 } from "../shared/snapshot.ts"
 import { emptyAggregates, emptyBucket, record, snapshotOf } from "../shared/aggregate.ts"
@@ -166,5 +168,91 @@ describe("selectSessions", () => {
 
   test("空桶返回空对象", () => {
     assert.deepEqual(selectSessions({}, "$"), {})
+  })
+
+  // ── M5/A1：选中粒度必须是"整棵树"，否则子树要么算漏、要么整片变 — ──
+
+  /** 带用量的桶，便于断言子树合计而不是只看 id 在不在。 */
+  const busy = (last_ts: number, parent_id: string | null = null, steps = 1) => ({
+    ...bucket(last_ts, parent_id),
+    steps,
+    ok: steps,
+  })
+
+  test("父会话比子会话旧时，整棵树一起进快照", () => {
+    const sessions = {
+      ses_root: busy(1, null, 3),
+      ses_child: busy(100, "ses_root", 5),
+      ses_x: busy(90, null, 1),
+      ses_y: busy(80, null, 1),
+    }
+    // 按 last_ts 逐个截断只会留 {ses_child, ses_x}，父会话被挤掉 → 面板整片显示 —
+    const got = selectSessions(sessions, "$", 2)
+    assert.deepEqual(Object.keys(got).sort(), ["ses_child", "ses_root"])
+  })
+
+  test("子会话更旧时不被父会话挤掉（子树合计不偏低）", () => {
+    const sessions = {
+      ses_root: busy(100, null, 3),
+      ses_child: busy(1, "ses_root", 5), // 最旧，逐个截断必被丢
+      ses_x: busy(90, null, 1),
+      ses_y: busy(80, null, 1),
+    }
+    const got = selectSessions(sessions, "$", 2)
+    assert.deepEqual(Object.keys(got).sort(), ["ses_child", "ses_root"])
+    // 断言的是"合计没错"：漏掉 ses_child 的话会只剩 3 步
+    assert.equal(subtreeBucketOf(got, "ses_root").steps, 8)
+  })
+
+  test("选中的会话必然连带整条父链与全部后代", () => {
+    const sessions: Record<string, ReturnType<typeof bucket>> = {}
+    // 主树：根 + 3 层子会话
+    sessions.ses_root = bucket(800, null)
+    sessions.ses_a = bucket(5, "ses_root")
+    sessions.ses_b = bucket(4, "ses_a")
+    sessions.ses_c = bucket(3, "ses_b")
+    sessions.ses_d = bucket(190, "ses_root")
+    // 两棵比主树更新的独立会话，再加一批更旧的，逼出截断
+    sessions.ses_n901 = bucket(901, null)
+    sessions.ses_n900 = bucket(900, null)
+    for (let i = 0; i < 40; i++) sessions[`ses_o${i}`] = bucket(50 + i, null)
+
+    const keep = new Set(selectedSessionIds(sessions, 10))
+    for (const id of keep) {
+      let p = sessions[id]!.parent_id
+      while (p !== null && sessions[p]) {
+        assert.ok(keep.has(p), `${id} 的父 ${p} 也被选中`)
+        p = sessions[p]!.parent_id
+      }
+      for (const [other, b] of Object.entries(sessions)) {
+        if (b.parent_id === id) assert.ok(keep.has(other), `${other} 是 ${id} 的后代`)
+      }
+    }
+    // 5 个主树成员 + 5 个独立会话 = 10，主树没被拆开
+    assert.equal(keep.size, 10)
+    for (const id of ["ses_root", "ses_a", "ses_b", "ses_c", "ses_d"]) {
+      assert.ok(keep.has(id), `${id} 必须在快照里`)
+    }
+  })
+
+  test("整棵树大过上限也整棵进（上限是软的）", () => {
+    const sessions: Record<string, ReturnType<typeof bucket>> = {
+      ses_root: bucket(100, null),
+    }
+    for (let i = 0; i < 5; i++) sessions[`ses_k${i}`] = bucket(100, "ses_root")
+    assert.equal(selectedSessionIds(sessions, 2).length, 6)
+  })
+
+  test("父会话从没写过用量行时，子会话自成一棵树", () => {
+    const sessions = { ses_child: bucket(5, "ses_never_wrote") }
+    assert.deepEqual(selectedSessionIds(sessions, 10), ["ses_child"])
+  })
+
+  test("parent_id 成环不抛异常，且结果仍然完整", () => {
+    const sessions = {
+      ses_a: bucket(1, "ses_b"),
+      ses_b: bucket(2, "ses_a"),
+    }
+    assert.deepEqual(selectedSessionIds(sessions, 10).sort(), ["ses_a", "ses_b"])
   })
 })

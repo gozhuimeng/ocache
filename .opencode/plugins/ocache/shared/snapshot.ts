@@ -39,7 +39,10 @@ export interface SessionSnapshot {
   readonly recent: readonly RecentEntry[]
 }
 
-/** 快照里保留的会话块数量上限（按 last_ts 倒序），控制快照体积。 */
+/**
+ * 快照里保留的会话块数量上限，控制快照体积。
+ * 按**树**为单位取，取满为止（详见 `selectedSessionIds`），因此实际数量可能略超这个值。
+ */
 export const SESSIONS_IN_SNAPSHOT = 50
 
 export interface Snapshot {
@@ -148,7 +151,93 @@ export async function readAggregate(baseDir: string): Promise<AggregateFile | nu
 }
 
 /**
- * 从聚合桶挑出会话块并截断到上限（按 last_ts 倒序）。
+ * 按 `parent_id` 把会话归并成树：rootId → 该树全部成员。
+ *
+ * 只在 `sessions` 内部走链——父会话从没写过用量行（不在集合里）时，子会话自成一棵树，
+ * 这与 `subtreeIds` 的口径一致（它也只在集合内找父）。
+ *
+ * 带 `seen` 防环：parentID 由宿主给出、正常不成环，但读取端容错是本项目对数据的
+ * 一贯要求（AGENTS.md），畸形链不能把快照发布挂掉。
+ */
+function forestOf(
+  sessions: Record<string, import("./aggregate.ts").SessionBucket>,
+): Map<string, string[]> {
+  const rootOf = new Map<string, string>()
+  for (const id of Object.keys(sessions)) {
+    if (rootOf.has(id)) continue
+    const chain: string[] = []
+    const seen = new Set<string>()
+    let cur: string | null = id
+    let root: string | null = null
+    while (cur !== null) {
+      const known = rootOf.get(cur)
+      if (known !== undefined) {
+        root = known // 接到已经归好的树上
+        break
+      }
+      if (seen.has(cur)) {
+        root = cur // 成环：以环上遇到的节点为根
+        break
+      }
+      seen.add(cur)
+      chain.push(cur)
+      const p: string | null = sessions[cur]!.parent_id // 显式标注：cur 的类型依赖 p，不标会成环
+      cur = p !== null && p in sessions ? p : null
+    }
+    if (root === null) root = chain[chain.length - 1]! // 走到顶端：最后一个就是根
+    for (const n of chain) rootOf.set(n, root)
+  }
+  const forest = new Map<string, string[]>()
+  for (const [id, r] of rootOf) {
+    const arr = forest.get(r)
+    if (arr) arr.push(id)
+    else forest.set(r, [id])
+  }
+  return forest
+}
+
+/**
+ * 挑出进快照的会话 id：**按树整棵进**，树之间按各自最新活跃时间从新到旧。
+ *
+ * ### 为什么不能按 last_ts 逐个截断（M5/A1）
+ *
+ * 面板每行都是 `subtreeIds(sessions, 当前会话)` 的结果，于是逐个截断有两种坏法：
+ *
+ * 1. **父留下、子被截掉** → 子树统计**偏低**（数据凭空少了）；
+ * 2. **子留下、父被截掉** → `subtreeIds` 找不到 rootID 返回空数组 →
+ *    面板第 2~6 行整片显示 `—`。
+ *
+ * 两种都源于"子树被切成两半"。改成整棵树进快照后，只要某棵树进了，
+ * 它的父链和后代就都在，任何子树查询都是完整的。
+ *
+ * ### 上限是软的
+ *
+ * 取到 `keep.size >= limit` 为止，但**取中时允许整棵树进**（哪怕略微超限）：
+ * 一棵树不整棵进就等于又回到截断。代价是极端情况下快照略大，
+ * 换来的是面板数字不会算错——快照是可丢弃的派生数据，体积可以往后放。
+ */
+export function selectedSessionIds(
+  sessions: Record<string, import("./aggregate.ts").SessionBucket>,
+  limit: number = SESSIONS_IN_SNAPSHOT,
+): string[] {
+  const trees = [...forestOf(sessions).entries()]
+    .map(([rootId, members]) => ({
+      members,
+      newest: members.reduce((m, id) => Math.max(m, sessions[id]!.last_ts), -Infinity),
+    }))
+    .sort(
+      (a, b) => b.newest - a.newest || (a.members[0]! < b.members[0]! ? -1 : 1),
+    )
+  const keep = new Set<string>()
+  for (const t of trees) {
+    if (keep.size >= limit) break
+    for (const m of t.members) keep.add(m)
+  }
+  return [...keep]
+}
+
+/**
+ * 从聚合桶挑出会话块并截断到上限。
  * 抽成纯函数是为了让"选哪些会话进快照"可脱离 OpenCode 单测。
  */
 export function selectSessions(
@@ -157,10 +246,8 @@ export function selectSessions(
   limit: number = SESSIONS_IN_SNAPSHOT,
 ): Record<string, SessionSnapshot> {
   const out: Record<string, SessionSnapshot> = {}
-  const entries = Object.entries(sessions)
-    .sort((a, b) => b[1].last_ts - a[1].last_ts || (a[0] < b[0] ? -1 : 1))
-    .slice(0, limit)
-  for (const [id, b] of entries) {
+  for (const id of selectedSessionIds(sessions, limit)) {
+    const b = sessions[id]!
     out[id] = {
       session_id: id,
       session_title: b.title,
