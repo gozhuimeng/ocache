@@ -5,10 +5,11 @@ node_modules/
 opencode-v2-research/
 
 # 覆盖全局 gitignore 的 .opencode/ 忽略规则：
-# 插件源码必须入库，其余 .opencode 本地状态保持忽略
+# 插件源码与插件配置必须入库，其余 .opencode 本地状态保持忽略
 !.opencode/
 .opencode/*
 !.opencode/plugins/
+!.opencode/opencode.json
 
 # 构建产物
 dist/
