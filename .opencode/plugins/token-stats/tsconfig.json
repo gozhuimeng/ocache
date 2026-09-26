@@ -12,8 +12,10 @@
     "exactOptionalPropertyTypes": false,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid",
     "types": ["node"]
   },
-  "include": ["index.ts", "shared/**/*.ts", "test/**/*.ts"],
+  "include": ["index.ts", "rpc.ts", "tui.tsx", "shared/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules"]
 }

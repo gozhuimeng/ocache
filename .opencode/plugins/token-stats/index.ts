@@ -5,7 +5,8 @@
  *
  * 数据链路：事件 → buildRow → 聚合（内存）+ JsonlStore（缓冲落盘）
  *                ↓
- *          .snapshot.json / ctx.storage  ←—— TUI 只读
+ *     RPC snapshot()/updated  ←—— TUI 只读（主通道，record=false 也可用）
+ *     ctx.storage / .snapshot.json      （持久镜像，便于外部查看与调试）
  *
  * 依赖的事件与钩子字段名全部以安装的 @opencode/{client,plugin} 类型定义为准
  * （v2.0.18），不凭记忆编写。
@@ -46,6 +47,7 @@ import {
 import { resolvePrice, type ModelPrice } from "./shared/billing.ts"
 import { AuxTracker, type RawUsage } from "./shared/aux.ts"
 import { toDate, toMonthDir, type Kind, type Status, type StepRow } from "./shared/schema.ts"
+import { TokenStatsRpc } from "./rpc.ts"
 
 /** Model.Ref 的形状（@opencode/schema）。 */
 interface ModelRefLike {
@@ -245,7 +247,20 @@ export default Plugin.define({
       }
     }
 
-    // ── 快照发布（storage 主通道 + record 时的文件兜底通道）────────
+    // ── 快照发布（RPC 推送为主通道，storage / 文件为持久镜像）────────
+    /**
+     * 通知 TUI 重新拉取快照。服务端 RPC 注册失败时为 null——
+     * 此时面板显示占位，其余链路（落盘、聚合）不受影响。
+     */
+    let notifyUpdated: (() => Promise<void>) | null = null
+    let disposeRpc: (() => Promise<void>) | null = null
+    /**
+     * 最近一次真正发布过的快照。RPC 直接回它、而不是每次现算，
+     * 这样 `updated` 才是"数据最后变化的时刻"——TUI 才能靠它去重，
+     * 否则每次轮询都拿到新时间戳，面板会无谓地每秒重绘。
+     */
+    let published: Snapshot | null = null
+
     function buildSnapshot(now: number): Snapshot {
       const sessions = selectSessions(agg.sessions, currency)
       const active =
@@ -274,6 +289,7 @@ export default Plugin.define({
       lastSnapshotAt = now
       writtenVersion = dataVersion
       const snap = buildSnapshot(now)
+      published = snap
       // 通道一：ctx.storage（不产生本插件的任何文件 → 满足 record=false 的验收）
       try {
         await ctx.storage.set(SNAPSHOT_KEY, toJsonValue(snap))
@@ -282,6 +298,23 @@ export default Plugin.define({
       }
       // 通道二：快照文件（record 开启时的兜底与调试通道）
       if (cfg.record) await writeSnapshot(baseDir, snap, (err) => log(err, "snapshot:file"))
+      // 通道三：RPC 事件推送。TUI 收到后自行 snapshot()，负载留空。
+      // fire-and-forget：推送失败不该拖慢 ticker，更不该抛给宿主。
+      if (notifyUpdated) void notifyUpdated().catch((err) => log(err, "snapshot:notify"))
+    }
+
+    // ── RPC：TUI 拉取快照的唯一实时通道（storage 两侧不互通，见 rpc.ts）──
+    try {
+      const registration = await ctx.rpc.register(TokenStatsRpc, {
+        // 回最近发布过的快照；尚无发布时现算一次兜底。
+        // 发布节流见 refreshSnapshot（snapshotMs，默认 250ms，ticker 500ms），
+        // 面板从数据变化到可见的延迟因此稳定在 1s 以内。
+        snapshot: async () => published ?? buildSnapshot(Date.now()),
+      })
+      notifyUpdated = () => registration.events.emit("updated", {})
+      disposeRpc = () => registration.dispose()
+    } catch (err) {
+      log(err, "rpc:register")
     }
 
     async function persist(): Promise<void> {
@@ -756,6 +789,14 @@ export default Plugin.define({
       }
       await persist()
       await refreshSnapshot(true)
+      // 最后注销 RPC：卸载过程中 TUI 仍读得到最终快照
+      if (disposeRpc) {
+        try {
+          await disposeRpc()
+        } catch (err) {
+          log(err, "rpc:dispose")
+        }
+      }
     }
   },
 })

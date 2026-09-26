@@ -8,7 +8,7 @@
 import { readFile, rename, rm, mkdir, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { randomBytes } from "node:crypto"
-import type { Aggregates } from "./aggregate.ts"
+import { emptyBucket, type Aggregates, type Bucket } from "./aggregate.ts"
 
 /** 会话实时块（服务端每步更新；含子会话行以便展示期聚合）。 */
 export interface SessionSnapshot {
@@ -175,4 +175,80 @@ export function selectSessions(
     }
   }
   return out
+}
+
+/**
+ * 快照里以 rootID 为根的会话子树（含自身）的 id 列表。
+ *
+ * 与 `aggregate.subtreeBucket` 同口径（parent_id 反复闭包），但输入是
+ * 快照的会话块：TUI 手里只有快照，没有完整 Aggregates（M5）。
+ * 找不到 rootID 返回空数组——新建会话还没写过行时的正常状态。
+ */
+export function subtreeIds(
+  sessions: Record<string, SessionSnapshot>,
+  rootID: string,
+): string[] {
+  if (!sessions[rootID]) return []
+  const ids = new Set<string>([rootID])
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [id, b] of Object.entries(sessions)) {
+      if (ids.has(id)) continue
+      if (b.parent_id !== null && ids.has(b.parent_id)) {
+        ids.add(id)
+        grew = true
+      }
+    }
+  }
+  return [...ids]
+}
+
+/** 快照侧子树合计：当前会话块显示的就是它（自身 + 全部后代子会话）。 */
+export function subtreeBucketOf(
+  sessions: Record<string, SessionSnapshot>,
+  rootID: string,
+): Bucket {
+  const out = emptyBucket()
+  for (const id of subtreeIds(sessions, rootID)) {
+    const b = sessions[id]
+    if (!b) continue
+    out.input += b.input
+    out.cacheRead += b.cache_read
+    out.cacheWrite += b.cache_write
+    out.output += b.output
+    out.reasoning += b.reasoning
+    out.steps += b.steps
+    out.ok += b.ok
+    out.error += b.error
+    out.cost += b.cost
+  }
+  return out
+}
+
+/** 服务端还没发布过快照时的占位（TUI 初始值），字段齐全避免到处判空。 */
+export function emptySnapshot(currency = ""): Snapshot {
+  return {
+    schema: SNAPSHOT_SCHEMA,
+    updated: 0,
+    record: false,
+    currency,
+    last_session_id: null,
+    sessions: {},
+    agg: null,
+  }
+}
+
+/**
+ * 读取端容错：RPC 回包只校验顶层结构，字段不对就当没数据。
+ * 拒绝一个畸形对象比在渲染 getter 里抛异常安全得多（面板降级成占位）。
+ */
+export function isSnapshot(v: unknown): v is Snapshot {
+  if (typeof v !== "object" || v === null) return false
+  const s = v as Partial<Snapshot>
+  if (typeof s.updated !== "number") return false
+  if (typeof s.currency !== "string") return false
+  if (typeof s.sessions !== "object" || s.sessions === null) return false
+  if (s.agg !== null && s.agg !== undefined && typeof s.agg !== "object") return false
+  return true
 }
