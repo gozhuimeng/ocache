@@ -16,6 +16,7 @@ import {
   hitRate,
   successRate,
   snapshotOf,
+  subtreeBucket,
 } from "../shared/aggregate.ts"
 
 const tokens = { input: 100_000, cacheRead: 900_000, cacheWrite: 50_000, output: 20_000, reasoning: 5_000 }
@@ -109,27 +110,27 @@ describe("billing", () => {
 describe("aggregate", () => {
   test("只统计 primary，其他 kind 不计入", () => {
     const agg = emptyAggregates()
-    assert.equal(record(agg, { date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" }), true)
-    assert.equal(record(agg, { date: "2026-09-26", tokens, cost: 1, ok: true, kind: "title" }), false)
-    assert.equal(record(agg, { date: "2026-09-26", tokens, cost: 1, ok: false, kind: "compaction" }), false)
+    assert.equal(record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" }), true)
+    assert.equal(record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "title" }), false)
+    assert.equal(record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: false, kind: "compaction" }), false)
     assert.equal(agg.totals.steps, 1)
     assert.equal(agg.totals.cost, 1)
   })
 
   test("今日/本月/全部三个口径同步累加", () => {
     const agg = emptyAggregates()
-    record(agg, { date: "2026-09-26", tokens, cost: 0.5, ok: true, kind: "primary" })
-    record(agg, { date: "2026-09-26", tokens, cost: 0.25, ok: false, kind: "primary" })
-    record(agg, { date: "2026-09-20", tokens, cost: 2, ok: true, kind: "primary" })
-    record(agg, { date: "2026-08-31", tokens, cost: 4, ok: true, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 0.5, ok: true, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 0.25, ok: false, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-20", tokens, cost: 2, ok: true, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-08-31", tokens, cost: 4, ok: true, kind: "primary" })
 
     assert.equal(agg.totals.steps, 4)
     assert.equal(agg.totals.cost, 6.75)
-    assert.equal(agg.daily["2026-09-26"].steps, 2)
-    assert.equal(agg.daily["2026-09-26"].cost, 0.75)
-    assert.equal(agg.monthly["2026-09"].steps, 3)
-    assert.equal(agg.monthly["2026-09"].cost, 2.75)
-    assert.equal(agg.monthly["2026-08"].steps, 1)
+    assert.equal(agg.daily["2026-09-26"]!.steps, 2)
+    assert.equal(agg.daily["2026-09-26"]!.cost, 0.75)
+    assert.equal(agg.monthly["2026-09"]!.steps, 3)
+    assert.equal(agg.monthly["2026-09"]!.cost, 2.75)
+    assert.equal(agg.monthly["2026-08"]!.steps, 1)
 
     const snap = snapshotOf(agg, "2026-09-26", "2026-09")
     assert.equal(snap.today.steps, 2)
@@ -149,9 +150,9 @@ describe("aggregate", () => {
     assert.equal(hitRate({ input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0 }), 0)
 
     const agg = emptyAggregates()
-    record(agg, { date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" })
-    record(agg, { date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" })
-    record(agg, { date: "2026-09-26", tokens, cost: 1, ok: false, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "primary" })
+    record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: false, kind: "primary" })
     assert.equal(successRate(agg.totals), 2 / 3)
     assert.equal(successRate(emptyAggregates().totals), 0)
   })
@@ -160,9 +161,95 @@ describe("aggregate", () => {
     const a = emptyAggregates()
     const b = emptyAggregates()
     for (const date of ["2026-01-01", "2026-09-26"]) {
-      record(a, { date, tokens, cost: 1, ok: true, kind: "primary" })
-      record(b, { date, tokens, cost: 1, ok: true, kind: "primary" })
+      record(a, { ts: 1, date, tokens, cost: 1, ok: true, kind: "primary" })
+      record(b, { ts: 1, date, tokens, cost: 1, ok: true, kind: "primary" })
     }
     assert.deepEqual(a, b)
+  })
+
+  const sinfo = (parent: string | null) => ({
+    parent_id: parent,
+    title: "t",
+    provider_id: "p",
+    model_id: "m",
+    model_name: "M",
+    variant: null,
+    agent: "build",
+  })
+
+  test("带 session 时按会话分桶，归属取最新一步", () => {
+    const agg = emptyAggregates()
+    record(agg, {
+      ts: 100,
+      date: "2026-09-26",
+      tokens,
+      cost: 1,
+      ok: true,
+      kind: "primary",
+      session_id: "ses_a",
+      session: { ...sinfo(null), title: "旧标题", model_id: "old" },
+    })
+    record(agg, {
+      ts: 200,
+      date: "2026-09-26",
+      tokens,
+      cost: 2,
+      ok: false,
+      kind: "primary",
+      session_id: "ses_a",
+      session: sinfo(null),
+    })
+    const b = agg.sessions["ses_a"]!
+    assert.equal(b.steps, 2)
+    assert.equal(b.ok, 1)
+    assert.equal(b.error, 1)
+    assert.equal(b.cost, 3)
+    assert.equal(b.last_ts, 200)
+    assert.equal(b.title, "t")
+    assert.equal(b.model_id, "m")
+    // 会话桶合计必须与 totals 一致
+    assert.equal(b.cost, agg.totals.cost)
+    assert.equal(b.steps, agg.totals.steps)
+  })
+
+  test("非 primary 不写会话桶", () => {
+    const agg = emptyAggregates()
+    assert.equal(
+      record(agg, { ts: 1, date: "2026-09-26", tokens, cost: 1, ok: true, kind: "title", session_id: "ses_a", session: sinfo(null) }),
+      false,
+    )
+    assert.deepEqual(agg.sessions, {})
+    assert.equal(agg.totals.steps, 0)
+  })
+
+  test("subtreeBucket 聚合整棵子树且不重复计数", () => {
+    const agg = emptyAggregates()
+    const add = (id: string, parent: string | null, ok: boolean) =>
+      record(agg, {
+        ts: 1,
+        date: "2026-09-26",
+        tokens,
+        cost: 1,
+        ok,
+        kind: "primary",
+        session_id: id,
+        session: sinfo(parent),
+      })
+    add("root", null, true)
+    add("child1", "root", true)
+    add("child2", "root", false)
+    add("grand", "child1", true)
+    add("unrelated", null, true)
+
+    const sub = subtreeBucket(agg, "root")
+    assert.equal(sub.steps, 4) // root + child1 + child2 + grand
+    assert.equal(sub.cost, 4)
+    assert.equal(sub.ok, 3)
+    assert.equal(sub.error, 1)
+    assert.equal(agg.totals.steps, 5)
+
+    assert.equal(subtreeBucket(agg, "child1").steps, 2)
+    assert.equal(subtreeBucket(agg, "grand").steps, 1)
+    assert.equal(subtreeBucket(agg, "missing").steps, 0)
   })
 })

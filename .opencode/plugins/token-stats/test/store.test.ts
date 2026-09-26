@@ -73,10 +73,10 @@ describe("JsonlStore 写侧", () => {
     const file = path.join(dir, "2026-09", "ses_a.jsonl")
     const ls = await lines(file)
     assert.equal(ls.length, 3)
-    const meta = JSON.parse(ls[0])
+    const meta = JSON.parse(ls[0]!)
     assert.equal(meta.type, "meta")
     assert.equal(meta.schema, SCHEMA_VERSION)
-    const first = JSON.parse(ls[1]) as StepRow
+    const first = JSON.parse(ls[1]!) as StepRow
     assert.equal(first.session_id, "ses_a")
     assert.equal(first.ts, 1)
     assert.deepEqual(store.pending(), { sessions: 0, rows: 0, bytes: 0 })
@@ -202,7 +202,7 @@ describe("readSince 增量同步", () => {
     await store.flushAll()
     const third = await readSince(dir, second.cursors)
     assert.equal(third.rows.length, 1)
-    assert.equal(third.rows[0].ts, 9)
+    assert.equal(third.rows[0]!.ts, 9)
   })
 
   test("游标停在完整行尾：崩溃留下的半行不会被永久跳过", async () => {
@@ -225,7 +225,7 @@ describe("readSince 增量同步", () => {
     await appendFile(file, `${rest}\n`)
     const third = await readSince(dir, second.cursors)
     assert.equal(third.rows.length, 1)
-    assert.equal(third.rows[0].ts, 3)
+    assert.equal(third.rows[0]!.ts, 3)
   })
 
   test("坏行被跳过且游标仍推进", async () => {
@@ -255,7 +255,7 @@ describe("readSince 增量同步", () => {
     const second = await readSince(dir, first.cursors)
     assert.deepEqual(second.rebuilt, ["2026-09/ses_a.jsonl"])
     assert.equal(second.rows.length, 1)
-    assert.equal(second.rows[0].ts, 100)
+    assert.equal(second.rows[0]!.ts, 100)
   })
 
   test("目录不存在返回空结果；被删文件的游标被剔除", async () => {

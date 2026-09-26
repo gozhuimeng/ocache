@@ -74,6 +74,7 @@ describe("aggregate 持久化", () => {
     const dir = path.join(root, "d")
     const agg = emptyAggregates()
     record(agg, {
+      ts: 1,
       date: "2026-09-26",
       tokens: { input: 1, cacheRead: 2, cacheWrite: 3, output: 4, reasoning: 5 },
       cost: 0.5,
