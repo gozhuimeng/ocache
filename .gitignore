@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 调研与需求文档（本地资料，不入库）
+opencode-v2-research/
+
+# 构建产物
+dist/
+*.tsbuildinfo
+
+# 日志与临时文件
+*.log
+.DS_Store
+.tmp/
+.tmp-*
+
+# 测试覆盖率
+coverage/
+
+# 本地环境
+.env
+.env.local
