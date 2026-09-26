@@ -4,6 +4,11 @@
   "private": true,
   "type": "module",
   "description": "OpenCode V2 token 用量统计：侧栏面板 + 自定义计费 + JSONL 落盘",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gozhuimeng/ocache.git"
+  },
   "exports": {
     ".": "./index.ts",
     "./tui": "./tui.tsx"
