@@ -1,11 +1,13 @@
 import { test, describe } from "node:test"
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 import {
   fmtCount,
   fmtInt,
   fmtCost,
   fmtPct,
   NO_DATA,
+  DIVIDER,
   lineHeader,
   lineSessionCounts,
   lineSessionRecent,
@@ -15,6 +17,7 @@ import {
   lineToday,
   lineMonth,
   lineTotal,
+  renderPanel,
 } from "../shared/format.ts"
 import {
   emptySnapshot,
@@ -393,5 +396,133 @@ describe("快照读取端容错", () => {
     assert.equal(isSnapshot({ updated: 1, currency: "$" }), false)
     assert.equal(isSnapshot({ updated: "1", currency: "$", sessions: {} }), false)
     assert.equal(isSnapshot({ updated: 1, currency: "$", sessions: {}, agg: 3 }), false)
+  })
+})
+
+describe("整块面板端到端断言（M5/A2）", () => {
+  /**
+   * 主会话 + 一个子会话。数字全部取整到能手算核对的量级：
+   *
+   * 子树合计 = steps 105 / ok 104 / error 1
+   *          input 1600 · cache_read 148400 · output 5300 · reasoning 3200 · cost 1.30
+   * 成功 = 104/105 = 99.048% → 一位 "99%"
+   * 命中 = 148400/150000 = 98.933% → 两位 "98.93%"
+   */
+  const sessions = {
+    root: sess({
+      session_id: "root",
+      session_title: "主会话",
+      agent: "build",
+      last_ts: 300,
+      steps: 100,
+      ok: 99,
+      error: 1,
+      input: 1000,
+      cache_read: 98900,
+      output: 5000,
+      reasoning: 3000,
+      cost: 1.2345,
+      recent: [{ ts: 300, input: 1, cacheRead: 39, cacheWrite: 0 }], // 39/40 = 97.50%
+    }),
+    child: sess({
+      session_id: "child",
+      parent_id: "root",
+      last_ts: 200,
+      steps: 5,
+      ok: 5,
+      input: 600,
+      cache_read: 49500,
+      output: 300,
+      reasoning: 200,
+      cost: 0.0655,
+      recent: [{ ts: 200, input: 11, cacheRead: 239, cacheWrite: 0 }], // 95.60%
+    }),
+  }
+  const agg = {
+    totals: {
+      input: 1, cacheRead: 2, cacheWrite: 3, output: 4, reasoning: 5,
+      steps: 12345, ok: 12300, error: 45, cost: 1234.5,
+    },
+    today: {
+      input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0,
+      steps: 12, ok: 12, error: 0, cost: 0.045,
+    },
+    month: {
+      input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0,
+      steps: 340, ok: 337, error: 3, cost: 1.23,
+    },
+  }
+  const s = snap({ updated: 1, record: true, sessions, agg })
+
+  test("面板恒为 10 行", () => {
+    assert.equal(renderPanel(s, "root").length, 10)
+    assert.equal(renderPanel(snap({}), "x").length, 10)
+  })
+
+  test("十行全串逐行断言：子会话聚合 + 两位小数命中率 + 三口径", () => {
+    assert.deepEqual(
+      renderPanel(s, "root").map((l) => l.text),
+      [
+        "ocache +1 子会话 · ● 记录中",
+        "请求 105 · 成功 99% · 命中 98.93%",
+        "本次 97.50% +1.90%",
+        "未命中 1.6K · 缓存读 148K",
+        "缓存写 0 · 输出 5.3K",
+        "推理 3.2K · 费用 ¥1.30",
+        DIVIDER,
+        "今日 ¥0.045 · 100% 成功",
+        "本月 ¥1.23 · 99.1% 成功",
+        "累计 ¥1,234.50 · 12,345 请求 · 99.6% 成功",
+      ],
+    )
+  })
+
+  test("记录状态三态：首帧不显示 / 仅内存 / 记录中", () => {
+    // updated=0（首帧快照还没到）→ 不带状态尾巴，避免闪一句"仅内存"误导
+    assert.equal(renderPanel(snap({ sessions }), "root")[0]!.text, "ocache +1 子会话")
+    const off = snap({ updated: 1, record: false, sessions, agg })
+    assert.equal(renderPanel(off, "root")[0]!.text, "ocache +1 子会话 · ○ 仅内存")
+    assert.equal(renderPanel(s, "root")[0]!.text, "ocache +1 子会话 · ● 记录中")
+  })
+
+  test("会话毫无数据：标题行照常，第 2~6 行整片占位，历史三口径不受影响", () => {
+    const empty = snap({ updated: 1, record: true, agg })
+    assert.deepEqual(
+      renderPanel(empty, "没见过的会话").map((l) => l.text),
+      [
+        "ocache · ● 记录中",
+        NO_DATA,
+        NO_DATA,
+        NO_DATA,
+        NO_DATA,
+        NO_DATA,
+        DIVIDER,
+        "今日 ¥0.045 · 100% 成功",
+        "本月 ¥1.23 · 99.1% 成功",
+        "累计 ¥1,234.50 · 12,345 请求 · 99.6% 成功",
+      ],
+    )
+  })
+
+  test("历史口径整体缺失时也还是 10 行，不会塌成 7 行", () => {
+    const noAgg = snap({ updated: 1, record: true, sessions })
+    const got = renderPanel(noAgg, "root").map((l) => l.text)
+    assert.equal(got.length, 10)
+    assert.equal(got[7], NO_DATA)
+    assert.equal(got[8], NO_DATA)
+    assert.equal(got[9], NO_DATA)
+  })
+
+  /**
+   * tui.tsx 用**十条固定 `<text>`** 而不是 `.map(renderPanel)`——
+   * `.map` 每秒重建整棵子树、终端里会闪（REQUIREMENTS §4 实现约束）。
+   * 代价是渲染顺序与 `renderPanel` 分居两处，会被人改乱。
+   * 这条测试反查 tui.tsx 源码，钉死两者一致。
+   */
+  test("renderPanel 的行序与 tui.tsx 里固定 <text> 的顺序一致", async () => {
+    const src = await readFile(new URL("../tui.tsx", import.meta.url), "utf8")
+    const inTui = [...src.matchAll(/<text>\{([A-Za-z_$][\w$]*)/g)].map((m) => m[1]!)
+    assert.ok(inTui.length > 0, "没能从 tui.tsx 解析出 <text> 行——渲染结构被改过？")
+    assert.deepEqual(renderPanel(s, "root").map((l) => l.name), inTui)
   })
 })

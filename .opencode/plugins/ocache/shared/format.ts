@@ -217,5 +217,44 @@ export function lineTotal(s: Snapshot): string {
   return `累计 ${fmtCost(b.cost, s.currency)} · ${fmtInt(b.steps)} 请求 · ${fmtPct(successRate(b))} 成功`
 }
 
+/**
+ * 无数据时的分隔行；宽度按侧栏常见尺寸取，不随终端宽度变化。
+ * 放在 format 而不是 tui.tsx：整块面板的行序由 `renderPanel` 统一持有，
+ * 才能让测试拿它和真实渲染逐行对齐。
+ */
+export const DIVIDER = "────────────────────"
+
+/** 面板一行的渲染结果：`name` 与 tui.tsx 里调用的标识符一一对应。 */
+export interface PanelLine {
+  readonly name: string
+  readonly text: string
+}
+
+/**
+ * 整块面板的全部行（顺序即 tui.tsx 里固定 `<text>` 的顺序）。
+ *
+ * 存在的意义是**给测试一个能整块断言的对象**：单行函数的断言只能保证
+ * "这一行没写错"，保证不了"这十行拼起来还是那块面板"。把行序收在一处，
+ * 测试既能整串快照，又能反查 tui.tsx 的渲染顺序有没有被人改乱。
+ *
+ * 注意 tui.tsx **仍然**用十条固定的 `<text>` 而不是 `.map` 本函数——
+ * `.map` 每秒重建整棵子树、终端里会闪（REQUIREMENTS §4 实现约束）。
+ * 这里只是它的等价描述，不参与实际渲染。
+ */
+export function renderPanel(s: Snapshot, sid: string): PanelLine[] {
+  return [
+    { name: "lineHeader", text: lineHeader(s, sid) },
+    { name: "lineSessionCounts", text: lineSessionCounts(s, sid) },
+    { name: "lineSessionRecent", text: lineSessionRecent(s, sid) },
+    { name: "lineSessionMissRead", text: lineSessionMissRead(s, sid) },
+    { name: "lineSessionWriteOut", text: lineSessionWriteOut(s, sid) },
+    { name: "lineSessionReasonCost", text: lineSessionReasonCost(s, sid) },
+    { name: "DIVIDER", text: DIVIDER },
+    { name: "lineToday", text: lineToday(s) },
+    { name: "lineMonth", text: lineMonth(s) },
+    { name: "lineTotal", text: lineTotal(s) },
+  ]
+}
+
 /** 供 tui.tsx 引用的类型，避免它直接依赖聚合层细节。 */
 export type { SessionSnapshot }

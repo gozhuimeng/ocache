@@ -16,6 +16,7 @@ import { Plugin } from "@opencode/plugin/tui"
 import { OcacheRpc } from "./rpc.ts"
 import { emptySnapshot, isSnapshot, type Snapshot } from "./shared/snapshot.ts"
 import {
+  DIVIDER,
   lineHeader,
   lineMonth,
   lineSessionCounts,
@@ -29,9 +30,6 @@ import {
 
 /** 兜底轮询间隔：事件推送为主，轮询只补掉漏掉的事件。 */
 const POLL_MS = 1000
-
-/** 无数据时的分隔行；宽度按侧栏常见尺寸取，不随终端宽度变化。 */
-const DIVIDER = "────────────────────"
 
 export default Plugin.define({
   id: "ocache-tui",
