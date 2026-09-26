@@ -47,7 +47,7 @@ import {
 import { resolvePrice, type ModelPrice } from "./shared/billing.ts"
 import { AuxTracker, type RawUsage } from "./shared/aux.ts"
 import { toDate, toMonthDir, type Kind, type Status, type StepRow } from "./shared/schema.ts"
-import { TokenStatsRpc } from "./rpc.ts"
+import { OcacheRpc } from "./rpc.ts"
 
 /** Model.Ref 的形状（@opencode/schema）。 */
 interface ModelRefLike {
@@ -118,7 +118,7 @@ const KIND_FALLBACK_MS = 30_000
 const SNAPSHOT_KEY = "snapshot"
 
 export default Plugin.define({
-  id: "token-stats",
+  id: "ocache",
   async setup(ctx) {
     const cfg = parseConfig(ctx.options)
     const baseDir = resolveBaseDir()
@@ -126,7 +126,7 @@ export default Plugin.define({
 
     /** 数据链路失败只记日志，绝不抛向宿主。 */
     const log = (err: unknown, where: string): void => {
-      console.error(`[token-stats] ${where}:`, err)
+      console.error(`[ocache] ${where}:`, err)
     }
 
     /**
@@ -224,9 +224,9 @@ export default Plugin.define({
         if (!rebuild) sync = await readSince(baseDir, cursors, log)
         if (sync.rebuilt.length > 0 || rebuild) {
           if (sync.rebuilt.length > 0) {
-            console.error(`[token-stats] files rebuilt: ${sync.rebuilt.join(", ")}`)
+            console.error(`[ocache] files rebuilt: ${sync.rebuilt.join(", ")}`)
           } else {
-            console.error("[token-stats] legacy aggregate cache; full rescan")
+            console.error("[ocache] legacy aggregate cache; full rescan")
           }
           agg = emptyAggregates()
           cursors = {}
@@ -305,7 +305,7 @@ export default Plugin.define({
 
     // ── RPC：TUI 拉取快照的唯一实时通道（storage 两侧不互通，见 rpc.ts）──
     try {
-      const registration = await ctx.rpc.register(TokenStatsRpc, {
+      const registration = await ctx.rpc.register(OcacheRpc, {
         // 回最近发布过的快照；尚无发布时现算一次兜底。
         // 发布节流见 refreshSnapshot（snapshotMs，默认 250ms，ticker 500ms），
         // 面板从数据变化到可见的延迟因此稳定在 1s 以内。

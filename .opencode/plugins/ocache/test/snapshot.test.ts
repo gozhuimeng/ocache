@@ -18,7 +18,7 @@ let root = ""
 
 before(async () => {
   await mkdir("/tmp/opencode", { recursive: true })
-  root = await mkdtemp(path.join("/tmp/opencode", "token-stats-snap-"))
+  root = await mkdtemp(path.join("/tmp/opencode", "ocache-snap-"))
 })
 
 after(async () => {

@@ -1,7 +1,7 @@
 /**
  * TUI 侧栏统计面板（M4）。
  *
- * 架构约束（AGENTS.md）：TUI 只读展示，**永不**读写 token-stats 的数据文件。
+ * 架构约束（AGENTS.md）：TUI 只读展示，**永不**读写 ocache 的数据文件。
  * 这里的每一条数字都来自服务端插件发布的快照，通道见 `rpc.ts`：
  * 事件 `updated` 推送为主、1s 轮询兜底，保证"当前会话"块 1 秒内刷新。
  *
@@ -13,7 +13,7 @@
  */
 import { createSignal } from "solid-js"
 import { Plugin } from "@opencode/plugin/tui"
-import { TokenStatsRpc } from "./rpc.ts"
+import { OcacheRpc } from "./rpc.ts"
 import { emptySnapshot, isSnapshot, type Snapshot } from "./shared/snapshot.ts"
 import {
   lineHeader,
@@ -33,10 +33,10 @@ const POLL_MS = 1000
 const DIVIDER = "────────────────────"
 
 export default Plugin.define({
-  id: "token-stats-tui",
+  id: "ocache-tui",
   setup(context) {
     const [snap, setSnap] = createSignal<Snapshot>(emptySnapshot())
-    const rpc = context.client.rpc(TokenStatsRpc)
+    const rpc = context.client.rpc(OcacheRpc)
     /**
      * RPC 是按 location 注册的：不带 location 调用会得到 rpc.unavailable
      * （官方 client 文档的示例也是显式传的）。宿主没给 location 时退回 cwd。

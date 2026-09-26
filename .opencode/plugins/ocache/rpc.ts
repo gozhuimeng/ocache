@@ -7,7 +7,7 @@
  * `initial`，写进去的服务端也看不到（V3 结论：两侧不互通）。
  *
  * 因此快照改走 OpenCode 插件 RPC：服务端在 setup 里 register，
- * TUI 用 `context.client.rpc(TokenStatsRpc)` 拉取并订阅 `updated` 推送。
+ * TUI 用 `context.client.rpc(OcacheRpc)` 拉取并订阅 `updated` 推送。
  * 这条通道只返回内存聚合，`record=false` 时不产生任何文件也能正常显示面板。
  *
  * 契约只声明"是个对象"，字段结构由 shared/snapshot.ts 的 Snapshot 保证：
@@ -15,8 +15,8 @@
  */
 import { Rpc } from "@opencode/plugin/rpc"
 
-export const TokenStatsRpc = Rpc.define({
-  id: "token-stats",
+export const OcacheRpc = Rpc.define({
+  id: "ocache",
   methods: {
     /**
      * 取当前内存快照；服务端插件未加载时会返回 rpc.method_not_found。
