@@ -1,7 +1,7 @@
 import { test, describe } from "node:test"
 import assert from "node:assert/strict"
 import { buildRow, pickModelCost, rowTokens, rowMonth } from "../shared/row.ts"
-import { parseConfig, DEFAULT_CONFIG, effectiveCurrency } from "../shared/config.ts"
+import { parseConfig, DEFAULT_CONFIG } from "../shared/config.ts"
 import { computeCost } from "../shared/billing.ts"
 
 const session = {
@@ -141,8 +141,7 @@ describe("parseConfig", () => {
     const c = parseConfig({
       record: false,
       currency: "credits",
-      useModelPrice: true,
-      prices: { input: 2, cacheRead: null, cacheWrite: -1, output: "8", bogus: 1 },
+      exchangeRate: 7.1429,
       flushRows: 50,
       flushAgeMs: -1,
       flushBytes: "nope",
@@ -151,12 +150,7 @@ describe("parseConfig", () => {
     })
     assert.equal(c.record, false)
     assert.equal(c.currency, "credits")
-    assert.equal(c.useModelPrice, true)
-    assert.equal(c.prices.input, 2)
-    assert.equal(c.prices.cacheRead, null)
-    assert.equal(c.prices.cacheWrite, undefined) // 负数丢弃
-    assert.equal(c.prices.output, undefined) // 字符串丢弃
-    assert.equal("bogus" in c.prices, false)
+    assert.equal(c.exchangeRate, 7.1429)
     assert.equal(c.flushRows, 50)
     assert.equal(c.flushAgeMs, DEFAULT_CONFIG.flushAgeMs) // 负数回落
     assert.equal(c.flushBytes, DEFAULT_CONFIG.flushBytes)
@@ -171,25 +165,57 @@ describe("parseConfig", () => {
     assert.equal(parseConfig({ currency: 123 }).currency, "$")
   })
 
-  test("D3：默认读模型自带价，配了 prices 才切自定义", () => {
-    assert.equal(parseConfig({}).useModelPrice, true, "完全无配置 → 读模型价")
-    assert.equal(parseConfig({ currency: "¥" }).useModelPrice, true, "只改标签 → 仍读模型价")
-    assert.equal(parseConfig({ prices: { input: 2 } }).useModelPrice, false, "配了价 → 自定义")
-    assert.equal(parseConfig({ prices: { input: null } }).useModelPrice, true, "只有 null 回落声明 → 模型价")
-    assert.equal(parseConfig({ prices: { bogus: 1 } }).useModelPrice, true, "非法价被丢弃后 → 模型价")
-    assert.equal(parseConfig({ useModelPrice: false, prices: {} }).useModelPrice, false, "显式 false 保留")
-    assert.equal(
-      parseConfig({ useModelPrice: true, prices: { input: 2 } }).useModelPrice,
-      true,
-      "显式 true 覆盖已配的价",
-    )
+  test("D3/D28：默认整条链交给内部价，且默认不换算", () => {
+    assert.deepEqual(parseConfig({}).modelPrices, {}, "完全无配置 → 全走内部价")
+    assert.equal(parseConfig({}).exchangeRate, 1, "默认不换算")
+    assert.deepEqual(parseConfig({ currency: "¥" }).modelPrices, {}, "只改标签仍不配价")
+    assert.equal(parseConfig({ currency: "¥" }).exchangeRate, 1, "只改标签 → 汇率不变")
   })
 
-  test("effectiveCurrency：全模型价 → $，有自定义价 → 用配置标签", () => {
-    assert.equal(effectiveCurrency(parseConfig({})), "$")
-    assert.equal(effectiveCurrency(parseConfig({ useModelPrice: true, currency: "¥", prices: { input: 2 } })), "$")
-    assert.equal(effectiveCurrency(parseConfig({ currency: "¥", prices: { input: 2 } })), "¥")
-    assert.equal(effectiveCurrency(parseConfig({ currency: "¥", prices: { input: null } })), "$")
-    assert.equal(effectiveCurrency(parseConfig({ currency: "credits", prices: { output: 8 } })), "credits")
+  test("exchangeRate：只接受正有限数", () => {
+    assert.equal(parseConfig({ exchangeRate: 7.1429 }).exchangeRate, 7.1429)
+    assert.equal(parseConfig({ exchangeRate: 0 }).exchangeRate, 1) // 0 会把内部价全归零
+    assert.equal(parseConfig({ exchangeRate: -1 }).exchangeRate, 1)
+    assert.equal(parseConfig({ exchangeRate: "7.2" }).exchangeRate, 1)
+    assert.equal(parseConfig({ exchangeRate: Number.NaN }).exchangeRate, 1)
+    assert.equal(parseConfig({ exchangeRate: Number.POSITIVE_INFINITY }).exchangeRate, 1)
+  })
+
+  test("modelPrices：两层嵌套，providerID 与 modelID 分开，只认合法四档", () => {
+    const c = parseConfig({
+      modelPrices: {
+        opencode: {
+          "mimo-v2.6-flash-free": { input: 1, cacheRead: 0.02, cacheWrite: 0, output: 2 },
+          "space-bunny-free": { input: "x", cacheWrite: -1, bogus: 9 }, // 一档都不合法 → 丢弃
+        },
+        Local: "nope", // 层级不对 → 丢弃
+      },
+    })
+    assert.deepEqual(c.modelPrices, {
+      opencode: { "mimo-v2.6-flash-free": { input: 1, cacheRead: 0.02, cacheWrite: 0, output: 2 } },
+    })
+  })
+
+  test("modelPrices 结构不对时只丢配置，不炸也不回落整体", () => {
+    assert.deepEqual(parseConfig({ modelPrices: "x" }).modelPrices, {})
+    assert.deepEqual(parseConfig({ modelPrices: [] }).modelPrices, {})
+    assert.deepEqual(parseConfig({ modelPrices: null }).modelPrices, {})
+    assert.deepEqual(parseConfig({ modelPrices: 42 }).modelPrices, {})
+    assert.deepEqual(parseConfig({ modelPrices: { p: { m: { input: 2 } } } }).modelPrices, {
+      p: { m: { input: 2 } },
+    })
+  })
+
+  test("modelPrices 的键长有上限，防超长键污染配置对象", () => {
+    const long = "x".repeat(300)
+    assert.deepEqual(parseConfig({ modelPrices: { [long]: { m: { input: 1 } } } }).modelPrices, {})
+    assert.deepEqual(parseConfig({ modelPrices: { p: { [long]: { input: 1 } } } }).modelPrices, {})
+  })
+
+  test("旧配置项 prices / useModelPrice 已移除，不再参与解析", () => {
+    const c = parseConfig({ prices: { input: 2 }, useModelPrice: false })
+    assert.deepEqual(c.modelPrices, {}, "不再切自定义价")
+    assert.equal("prices" in c, false)
+    assert.equal("useModelPrice" in c, false)
   })
 })

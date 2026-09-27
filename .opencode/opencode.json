@@ -6,11 +6,16 @@
       "options": {
         "record": true,
         "currency": "¥",
-        "prices": {
-          "input": 2.0,
-          "cacheRead": 0.2,
-          "cacheWrite": 2.5,
-          "output": 8.0
+        "exchangeRate": 7.1429,
+        "modelPrices": {
+          "opencode": {
+            "mimo-v2.6-flash-free": {
+              "input": 1,
+              "cacheRead": 0.02,
+              "cacheWrite": 0,
+              "output": 2
+            }
+          }
         }
       }
     }

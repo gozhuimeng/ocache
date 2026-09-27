@@ -51,31 +51,80 @@ describe("schema", () => {
 describe("billing", () => {
   const model = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }
 
-  test("useModelPrice=true 时忽略自定义价", () => {
-    const p = resolvePrice({ useModelPrice: true, currency: "¥", prices: { input: 999 } }, model)
-    assert.deepEqual(p, model)
-  })
-
-  test("单项为 null 回落到模型价，其余用自定义价", () => {
+  test("没配价 → 内部美元价 × exchangeRate（内部没有就按全 0）", () => {
     const p = resolvePrice(
-      { useModelPrice: false, currency: "¥", prices: { input: 2, output: 8, cacheRead: null } },
+      { ...DEFAULT_BILLING, exchangeRate: 7.1429 },
+      "opencode",
+      "mimo-v2.6-flash-free",
       model,
     )
-    assert.equal(p.input, 2)
-    assert.equal(p.output, 8)
-    assert.equal(p.cacheRead, 0.3) // 回落
-    assert.equal(p.cacheWrite, 3.75) // 未配置 → 回落
+    assert.equal(p.input, 3 * 7.1429)
+    assert.equal(p.cacheRead, 0.3 * 7.1429)
+    assert.equal(p.cacheWrite, 3.75 * 7.1429)
+    assert.equal(p.output, 15 * 7.1429)
   })
 
-  test("模型价缺失时用 0 兜底，不产生 NaN", () => {
-    const p = resolvePrice(DEFAULT_BILLING, undefined)
+  test("配了价 → 用自定义价；未配的档仍走内部价换算", () => {
+    const p = resolvePrice(
+      {
+        ...DEFAULT_BILLING,
+        currency: "¥",
+        exchangeRate: 7.1429,
+        modelPrices: { opencode: { "mimo-v2.6-flash-free": { input: 1, output: 2 } } },
+      },
+      "opencode",
+      "mimo-v2.6-flash-free",
+      model,
+    )
+    assert.equal(p.input, 1)
+    assert.equal(p.output, 2)
+    assert.equal(p.cacheRead, 0.3 * 7.1429)
+    assert.equal(p.cacheWrite, 3.75 * 7.1429)
+  })
+
+  test("providerID 与 modelID 分开：同名模型在别的 provider 下不共享价目", () => {
+    const cfg = {
+      ...DEFAULT_BILLING,
+      modelPrices: { opencode: { "mimo-v2.6-flash-free": { input: 1 } } },
+    }
+    assert.equal(resolvePrice(cfg, "opencode", "mimo-v2.6-flash-free", model).input, 1)
+    assert.equal(resolvePrice(cfg, "Local", "mimo-v2.6-flash-free", model).input, 3)
+    assert.equal(resolvePrice(cfg, "opencode", "space-bunny-free", model).input, 3)
+    assert.equal(resolvePrice(cfg, "unknown", "unknown", model).input, 3)
+  })
+
+  test("内部价缺失 → 全 0，不产生 NaN", () => {
+    const p = resolvePrice(DEFAULT_BILLING, "opencode", "nope", undefined)
     assert.deepEqual(p, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
     assert.equal(computeCost(tokens, p), 0)
+    assert.ok(Number.isFinite(computeCost(tokens, p)))
   })
 
-  test("useModelPrice=false 且完全无配置 → 全 0", () => {
-    const p = resolvePrice(DEFAULT_BILLING, undefined)
-    assert.ok(Number.isFinite(computeCost(tokens, p)))
+  test("内部价缺失但配了自定义价 → 只有配的那档收钱", () => {
+    const p = resolvePrice({ ...DEFAULT_BILLING, modelPrices: { p: { m: { output: 2 } } } }, "p", "m", undefined)
+    assert.deepEqual(p, { input: 0, output: 2, cacheRead: 0, cacheWrite: 0 })
+  })
+
+  test("resolvePrice 自身挡住非法自定义价（不依赖上游解析）", () => {
+    const cfg = { ...DEFAULT_BILLING, modelPrices: { p: { m: { input: -1, output: Number.NaN } } } }
+    const p = resolvePrice(cfg, "p", "m", model)
+    assert.equal(p.input, 3) // 回落内部价
+    assert.equal(p.output, 15)
+  })
+
+  test("汇率把内部价折回配置里的那套单价（¥1 / ¥0.02 / ¥2 ↔ $0.14 / $0.0028 / $0.28）", () => {
+    const p = resolvePrice(
+      { ...DEFAULT_BILLING, currency: "¥", exchangeRate: 7.1429 },
+      "p",
+      "m",
+      { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+    )
+    const near = (got: number, want: number): void =>
+      assert.ok(Math.abs(got - want) < 1e-4, `${got} ≉ ${want}`)
+    near(p.input, 1)
+    near(p.output, 2)
+    near(p.cacheRead, 0.02)
+    assert.equal(p.cacheWrite, 0)
   })
 
   test("计费公式：output 档覆盖 output + reasoning，除以百万", () => {
@@ -85,11 +134,20 @@ describe("billing", () => {
     assert.equal(computeCost(tokens, p), 0.705)
   })
 
-  test("自定义标签不影响数值", () => {
-    const p = resolvePrice({ useModelPrice: false, currency: "credits", prices: { input: 1000, output: 1000, cacheRead: 1000, cacheWrite: 1000 } }, model)
-    const cost = computeCost(tokens, p)
+  test("货币标签与汇率都不进计费公式，只影响单价本身", () => {
+    const p = resolvePrice(
+      {
+        ...DEFAULT_BILLING,
+        currency: "credits",
+        exchangeRate: 1,
+        modelPrices: { p: { m: { input: 1000, output: 1000, cacheRead: 1000, cacheWrite: 1000 } } },
+      },
+      "p",
+      "m",
+      model,
+    )
     // 1_075_000 * 1000 / 1e6 = 1075
-    assert.equal(cost, 1075)
+    assert.equal(computeCost(tokens, p), 1075)
   })
 
   test("fromModelCost 容忍松散形状", () => {

@@ -5,7 +5,7 @@
  * 解析必须容错：字段类型不对就回落默认值，绝不因配置错误让插件挂掉。
  */
 
-import type { BillingConfig } from "./billing.ts"
+import type { BillingConfig, ModelPriceConfig, ModelPrices } from "./billing.ts"
 import type { Price } from "./schema.ts"
 
 export interface PluginConfig extends BillingConfig {
@@ -28,12 +28,16 @@ export interface PluginConfig extends BillingConfig {
 }
 
 const PRICE_KEYS: ReadonlyArray<keyof Price> = ["input", "cacheRead", "cacheWrite", "output"]
+/** providerID / modelID 作为配置键的长度上限，防超长键污染配置对象。 */
+const MAX_MODEL_KEY = 256
+/** 每层键数量上限：配置是人手写的，超过这个数只可能是畸形输入。 */
+const MAX_ENTRIES = 1024
 
 export const DEFAULT_CONFIG: PluginConfig = {
   record: true,
   currency: "$",
-  useModelPrice: true,
-  prices: {},
+  exchangeRate: 1,
+  modelPrices: {},
   flushAgeMs: 30_000,
   flushRows: 100,
   flushBytes: 64 * 1024,
@@ -57,44 +61,73 @@ function str(v: unknown, fallback: string): string {
   return typeof v === "string" && v.length > 0 && v.length <= 32 ? v : fallback
 }
 
+/** 一档价：非负有限数字才算合法，其余（含负数、字符串、null）一律丢弃。 */
+function tier(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined
+}
+
+/** 解析单个模型的四档价；一档都没有就返回 undefined（整个模型条目作废）。 */
+function parseModelPrice(v: unknown): ModelPriceConfig | undefined {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return undefined
+  const raw = v as Record<string, unknown>
+  const out: Record<string, number> = {}
+  let any = false
+  for (const key of PRICE_KEYS) {
+    const n = tier(raw[key])
+    if (n !== undefined) {
+      out[key] = n
+      any = true
+    }
+  }
+  return any ? (out as ModelPriceConfig) : undefined
+}
+
 /**
- * 行内 `currency` 的实际标签。
- * 四档全部来自模型价时就是美元（模型价本身以 USD 计），标成别的货币是错的；
- * 只要有一档用了自定义价，就用用户配置的标签。
+ * 解析两层嵌套的 `modelPrices`：`{ providerID: { modelID: {四档} } }`。
+ * providerID 与 modelID 分开是刻意的（D28）：同一 modelID 在不同 provider 下是不同模型。
+ * 结构不对的分支直接跳过——配置错了只丢配置，不能让插件挂掉。
  */
-export function effectiveCurrency(cfg: PluginConfig): string {
-  if (cfg.useModelPrice) return "$"
-  const hasCustom = PRICE_KEYS.some((k) => typeof cfg.prices[k] === "number")
-  return hasCustom ? cfg.currency : "$"
+function parseModelPrices(v: unknown): ModelPrices {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return {}
+  const out: Record<string, Record<string, ModelPriceConfig>> = {}
+  let providers = 0
+  for (const [pid, pv] of Object.entries(v as Record<string, unknown>)) {
+    if (pid.length === 0 || pid.length > MAX_MODEL_KEY) continue
+    if (typeof pv !== "object" || pv === null || Array.isArray(pv)) continue
+    if (++providers > MAX_ENTRIES) break
+    const models: Record<string, ModelPriceConfig> = {}
+    let count = 0
+    for (const [mid, mv] of Object.entries(pv as Record<string, unknown>)) {
+      if (mid.length === 0 || mid.length > MAX_MODEL_KEY) continue
+      if (++count > MAX_ENTRIES) break
+      const price = parseModelPrice(mv)
+      if (price) models[mid] = price
+    }
+    if (Object.keys(models).length > 0) out[pid] = models
+  }
+  return out
 }
 
 /**
  * 解析 options 对象；任何异常路径都返回默认配置。
  *
- * 价格来源（D3）：
- * - 显式 `useModelPrice: true`  → 四档全用模型自带美元价，忽略 prices
- * - 显式 `useModelPrice: false` → 逐档用 prices，缺省/null 回落模型价
- * - 未设置                      → 配了任何 prices 则视为要自定义，
- *                                  否则读模型价（"默认读模型自带 cost"）
+ * 计价链（D3 / D28）只有唯一一条，逐档独立回落：
+ *   `modelPrices[provider][model][档]` → OpenCode 内部美元价 × `exchangeRate` → 0
+ *
+ * 已移除的旧配置项（D28）：`prices`（全局统一价）与 `useModelPrice`（三态开关）。
+ * "默认读模型自带 cost"这条 D3 本意现在由回落链第 2 段自然承担。
  */
 export function parseConfig(options: unknown): PluginConfig {
   const o = (typeof options === "object" && options !== null ? options : {}) as Record<string, unknown>
-  const raw = typeof o.prices === "object" && o.prices !== null ? (o.prices as Record<string, unknown>) : {}
-  const prices: Partial<Record<keyof Price, number | null>> = {}
-  for (const key of PRICE_KEYS) {
-    const v = raw[key]
-    // null 显式表示"该项回落模型价"，与缺省同义，但保留显式语义
-    if (v === null) prices[key] = null
-    else if (typeof v === "number" && Number.isFinite(v) && v >= 0) prices[key] = v
-  }
-  const hasCustomPrice = PRICE_KEYS.some((k) => typeof prices[k] === "number")
-  const useModelPrice =
-    typeof o.useModelPrice === "boolean" ? o.useModelPrice : !hasCustomPrice
   return {
     record: bool(o.record, DEFAULT_CONFIG.record),
     currency: str(o.currency, DEFAULT_CONFIG.currency),
-    useModelPrice,
-    prices,
+    // 必须为正有限数：0 会把所有内部价归零、负数会算出负账
+    exchangeRate:
+      typeof o.exchangeRate === "number" && Number.isFinite(o.exchangeRate) && o.exchangeRate > 0
+        ? o.exchangeRate
+        : DEFAULT_CONFIG.exchangeRate,
+    modelPrices: parseModelPrices(o.modelPrices),
     flushAgeMs: num(o.flushAgeMs, DEFAULT_CONFIG.flushAgeMs, 1),
     flushRows: num(o.flushRows, DEFAULT_CONFIG.flushRows, 1),
     flushBytes: num(o.flushBytes, DEFAULT_CONFIG.flushBytes, 1),

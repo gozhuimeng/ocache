@@ -18,7 +18,7 @@
  */
 
 import { Plugin } from "@opencode/plugin"
-import { parseConfig, effectiveCurrency } from "./shared/config.ts"
+import { parseConfig } from "./shared/config.ts"
 import { resolveBaseDir } from "./shared/paths.ts"
 import { JsonlStore, readSince, pruneOldMonths, type SyncResult } from "./shared/store.ts"
 import {
@@ -122,7 +122,9 @@ export default Plugin.define({
   async setup(ctx) {
     const cfg = parseConfig(ctx.options)
     const baseDir = resolveBaseDir()
-    const currency = effectiveCurrency(cfg)
+    // 每行的货币标签：所有单价（含内部美元价 × exchangeRate）都已折成 currency，
+    // 因此不存在第二套单位，也就不需要按币种给费用分账（D28）。
+    const currency = cfg.currency
 
     /** 数据链路失败只记日志，绝不抛向宿主。 */
     const log = (err: unknown, where: string): void => {
@@ -479,7 +481,7 @@ export default Plugin.define({
       const kind = takeKind(sid, providerID, modelID, agent)
       const models = await ensureModels()
       const entry = models.get(`${providerID}/${modelID}`)
-      const price = resolvePrice(cfg, entry?.price)
+      const price = resolvePrice(cfg, providerID, modelID, entry?.price)
       const idx = (stepCounter.get(sid) ?? 0) + 1
       stepCounter.set(sid, idx)
 
@@ -559,7 +561,7 @@ export default Plugin.define({
       const agent = picked.agent ?? meta.agent ?? "default"
       const models = await ensureModels()
       const entry = models.get(`${providerID}/${modelID}`)
-      const price = resolvePrice(cfg, entry?.price)
+      const price = resolvePrice(cfg, providerID, modelID, entry?.price)
       const idx = (stepCounter.get(sid) ?? 0) + 1
       stepCounter.set(sid, idx)
 

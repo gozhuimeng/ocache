@@ -32,9 +32,10 @@ export interface ModelCostEntry {
 }
 
 /**
- * 从 Model.Cost 数组挑一档并转成计费用的四档价。
+ * 从 Model.Cost 数组挑一档并转成计费用的四档价（单位 USD / 百万 token）。
  * 优先无 tier 的基础价；只有分档价时取第一档。
- * tier 依赖会话上下文长度，此处不做推断——需要精确值请用 options.prices 覆盖（D3）。
+ * tier 依赖会话上下文长度，此处不做推断——需要精确值请用 options.modelPrices
+ * 按 provider/model 覆盖（D3 / D28）；内部价的美元单位由 resolvePrice × exchangeRate 折算。
  */
 export function pickModelCost(costs: readonly ModelCostEntry[] | undefined): ModelPrice | undefined {
   if (!Array.isArray(costs) || costs.length === 0) return undefined
