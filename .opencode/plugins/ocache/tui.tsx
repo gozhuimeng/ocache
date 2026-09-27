@@ -11,11 +11,11 @@
  * .map 动态生成，那会每秒重建整棵子树、在终端里闪），行函数从
  * `shared/format.ts` 引入，可脱离 OpenCode 单测。
  *
- * **行数随布局变（M6）**：三档布局显示 14 / 10 / 2 行。空的 `<text>` 实测
- * 会占一整行，所以"不显示"是**不挂节点**——每行外面套一层
- * `show(layout(), 行名)` 守卫。行数只跟布局走、跟数据无关，节点结构
- * 仅在切换布局那一瞬变一次，不构成上面说的"每秒重建"。
- * 十四行的书写顺序必须与 `FULL_ORDER` 一致，反查测试会逐条比对。
+ * **行数随布局变（M6 立规矩，2026-09-27 改版重算）**：三档布局显示
+ * 16 / 13 / 2 行。空的 `<text>` 实测会占一整行，所以"不显示"是**不挂节点**——
+ * 每行外面套一层 `show(layout(), 行名)` 守卫。行数只跟布局走、跟数据无关，
+ * 节点结构仅在切换布局那一瞬变一次，不构成上面说的"每秒重建"。
+ * 十六行的书写顺序必须与 `FULL_ORDER` 一致，反查测试会逐条比对。
  *
  * **配色（M6）**：`shared/format.ts` 只产出"这段字是什么角色"（Tone），
  * 颜色在这里按主题翻译成色值——换主题、改配色都不用动文案与测试。
@@ -34,12 +34,12 @@ import {
   lineMonthDetail,
   lineRuleBottom,
   lineRuleTop,
+  lineSessionCache,
   lineSessionCost,
   lineSessionHit,
-  lineSessionMissRead,
-  lineSessionRecent,
-  lineSessionSuccess,
-  lineSessionWriteOut,
+  lineSessionInOut,
+  lineSessionReasoning,
+  lineSessionReq,
   lineToday,
   lineTodayDetail,
   lineTotal,
@@ -260,20 +260,20 @@ export default Plugin.define({
           {show(layout(), "lineHeader") && (
             <text fg={color("title")}>{paint(lineHeader(snap(), input.sessionID))}</text>
           )}
+          {show(layout(), "lineSessionReq") && (
+            <text fg={color("value")}>{paint(lineSessionReq(snap(), input.sessionID))}</text>
+          )}
           {show(layout(), "lineSessionHit") && (
             <text fg={color("value")}>{paint(lineSessionHit(snap(), input.sessionID))}</text>
           )}
-          {show(layout(), "lineSessionSuccess") && (
-            <text fg={color("value")}>{paint(lineSessionSuccess(snap(), input.sessionID))}</text>
+          {show(layout(), "lineSessionInOut") && (
+            <text fg={color("value")}>{paint(lineSessionInOut(snap(), input.sessionID))}</text>
           )}
-          {show(layout(), "lineSessionRecent") && (
-            <text fg={color("value")}>{paint(lineSessionRecent(snap(), input.sessionID))}</text>
+          {show(layout(), "lineSessionCache") && (
+            <text fg={color("value")}>{paint(lineSessionCache(snap(), input.sessionID))}</text>
           )}
-          {show(layout(), "lineSessionMissRead") && (
-            <text fg={color("value")}>{paint(lineSessionMissRead(snap(), input.sessionID))}</text>
-          )}
-          {show(layout(), "lineSessionWriteOut") && (
-            <text fg={color("value")}>{paint(lineSessionWriteOut(snap(), input.sessionID))}</text>
+          {show(layout(), "lineSessionReasoning") && (
+            <text fg={color("value")}>{paint(lineSessionReasoning(snap(), input.sessionID))}</text>
           )}
           {show(layout(), "lineSessionCost") && (
             <text fg={color("value")}>{paint(lineSessionCost(snap(), input.sessionID))}</text>

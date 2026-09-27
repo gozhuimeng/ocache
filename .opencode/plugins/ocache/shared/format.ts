@@ -11,10 +11,15 @@
  * 纯函数里，两者都能被测试钉死；颜色本身归 tui.tsx（要主题对象），
  * 拼回整串用 `plain()`。
  *
- * 版式两条原则（M6 定的，改动前先想清楚）：
+ * 版式三条原则（M6 定标签列，2026-09-27 改版定数值列，改动前先想清楚）：
  * 1. **标签列固定宽度**：所有行的标签补到 `LABEL_W` 格，数值从同一列起跳，
  *    于是四笔金额（费用/今日/本月/累计）竖成一列，扫一眼就能比大小。
- * 2. **弱化标签、放亮数值**：字段名和分隔符一律 `label`，只有数值才是
+ * 2. **数值列也固定宽度**：一行里"第一个数值"补到 `VALUE_W` 格，后面的
+ *    `·` 与第二个标签因此落在**同一列**——一行两段的行（`请求 · 成功`、
+ *    `输入 · 输出`…）横着看是两组数，竖着看是两列数。
+ *    靠手插空格排不出这效果：数值位数一变，后面的段就整体错位
+ *    （用户 2026-09-27 反馈"单独使用空格会出现错位展示"）。
+ * 3. **弱化标签、放亮数值**：字段名和分隔符一律 `label`，只有数值才是
  *    `value`，金额再单独给 `money`——一屏里眼睛只会往亮处走。
  *
  * **宽度是硬约束、纵向不是**：侧栏可用宽不归我们定（170 格终端实测约 35 格，
@@ -108,20 +113,71 @@ function pad(s: string, w: number): string {
 }
 
 /**
- * 左侧标签列宽（格）= 最长标签"未命中 / 缓存写"（6 格）+ 1 格间隙。
+ * 左侧标签列宽（格）= 7 = 最长标签 2 字（4 格）+ 3 格空档。
  *
- * 1 格是最小可用间隙：3 字标签与数值紧邻时仍有分隔；而 2 字标签
- * （请求 / 本次 / 费用 / 今日 / 本月 / 累计）会拿到 3 格空档，
- * 这段空档就是肉眼认出来的"列"。再宽就会挤爆侧栏（见文件头的宽度约束）。
+ * 3 格空档就是肉眼认出来的"列"：标签一律 2 字（请求 / 命中 / 输入 / 输出 /
+ * 缓读 / 缓写 / 推理 / 费用 / 今日 / 本月 / 累计），竖着扫下来每行同一个节奏。
+ * 再宽就会挤爆侧栏（见文件头的宽度约束）。
+ *
+ * 2026-09-27 之前按 3 字标签"缓存写"（6 格）+ 1 格间隙定的 7——数值一样，
+ * 但 1 格间隙贴着字看着发闷；缓存那行缩成 `缓读`/`缓写` 之后，这 3 格
+ * 正好还给空档，顺带消掉了"该行第二个数值右移 2 格"的例外（见 `lineSessionCache`）。
  *
  * 导出是为了让测试能自己算出行首，而不是把 7 这个魔数抄进断言——
  * 将来加长标签只要改这里。
  */
 export const LABEL_W = 7
 
+/**
+ * 第一列数值的列宽（格）= 最长常见数值 "96.39% / 987.7M"（6 格）。
+ *
+ * **一行两段的排版全靠它**：第一个数值补到这个宽度，` · ` 的 `·` 才会钉在
+ * 固定的**第 15 格**、第二个标签从第 17 格起跳、第二个数值落在第 22 格，
+ * 四行"请求 / 命中 / 输入 / 缓读"横平竖直地对上（列位一律按 1-based 的"第 N 格"说）。
+ *
+ * 6 是**上限而不是估值**：命中率取两位小数最多 `99.99%`（6 格），fmtCount
+ * 缩写最多 `987.7M`（6 格）。比它长的只有 `fmtInt` 的请求数（`987,654` =
+ * 7 格）——那种量级（单会话近百万次请求）现实中到不了，即便到了也只是
+ * 该行整体右移一格，宽度守卫测试仍然卡得住 35 格上限。
+ */
+export const VALUE_W = 6
+
+/**
+ * 金额列宽（格）= `¥123,456.77` 这种"六位数金额"的长度。
+ *
+ * 只在**金额后面还跟着东西**时补（紧凑档的历史行 `¥1.23 · 99.1% 成功`），
+ * 让三行的 `· 成功` 竖在同一列；展开档金额是行尾，补了也看不见，
+ * 所以那档根本不走这条路径。
+ *
+ * 取 11 是为了罩住测试里最胖的 `¥123,456.77`——超过它的金额仍会把该行的
+ * `·` 顶右一格，但整行宽度（7 + 11 + 3 + 5 + 1 + 4 = 31）离 35 还有余量。
+ */
+export const MONEY_W = 11
+
+/**
+ * 历史明细行"请求数"的列宽（格），**与会话块的 `VALUE_W` 分开定**，
+ * 因为两边的量级差着三个数量级：单会话顶多几百次请求（6 格够用），
+ * 而历史累计是几十万——`fmtInt` 出来的 `116,000` 就是 7 格，套 6 格会让
+ * `· 成功` 右移一格，三条明细竖着一看就是歪的（改版时实测踩到过）。
+ *
+ * 9 格盖到 `9,999,999`；再宽就把 35 格的余量吃光了
+ * （`7 + 9 + 5 + 3 + 5 + 5 = 34`，只剩 1 格）。
+ */
+export const DETAIL_W = 9
+
 /** 带标签的行首：补到 `LABEL_W` 宽，角色是 `label`（弱化）。 */
 function head(label: string): Seg {
   return seg(pad(label, LABEL_W), "label")
+}
+
+/**
+ * 第一个数值：补到 `VALUE_W` 宽，让后面的 ` · ` 与第二个标签落在固定列。
+ *
+ * **行尾的数值不要走它**——补出来的空格虽然看不见，却会变成测试里
+ * 永远对不上的尾随空白。谁后面还有段落，谁才补。
+ */
+function val(text: string): Seg {
+  return seg(pad(text, VALUE_W), "value")
 }
 
 /**
@@ -223,6 +279,20 @@ function trimZeros(text: string): string {
   return text.replace(/0+$/, "").replace(/\.$/, "")
 }
 
+/**
+ * 一位小数的百分比的列宽（格）：`99.9%` 满打满算 5 格，而 `100%` 只有 4 格。
+ *
+ * **只在后面还跟着标签时补**（历史行的 `· 成功`）——不补的话"今日"那行的
+ * `成功` 会比另两行左移一格，三条明细竖着一看就是歪的。
+ * 导出同 `LABEL_W`：让测试能自己算出 `成功` 落在第几格。
+ */
+export const PCT1_W = 5
+
+/** 一位小数的百分比，补到 `PCT1_W` 格。见 `PCT1_W`。 */
+function pct1(rate: number): Seg {
+  return seg(pad(fmtPct(rate), PCT1_W), "value")
+}
+
 /** 当前会话及其子会话的合计桶；会话不在快照里时返回空桶。 */
 export function sessionBucket(s: Snapshot, sid: string): Bucket {
   return subtreeBucketOf(s.sessions, sid)
@@ -261,120 +331,149 @@ export function lineHeader(s: Snapshot, sid: string): Seg[] {
 }
 
 /**
- * 请求 · 缓存命中率（当前会话含子会话）。
+ * 第 1 行：请求数 · 成功率（当前会话含子会话）。
  *
  * 这行**只放两样**。M6 实测过放三样的后果：`请求 · 成功 · 命中` 连标签列一起
- * 要 39 格，侧栏只有 35 格，行会折行、把面板撑高。会话级成功率因此挪到
- * 紧邻的下一行（`lineSessionSuccess`）——横向换纵向，两样都不丢；
- * 紧凑态才真的省掉它，因为那一档下面的历史三行本来就各带成功率。
- * 命中率是这个插件的主角，一次都不能少。
+ * 要 39 格，侧栏只有 35 格，行会折行、把面板撑高。命中率因此在下一行自成
+ * 一段（`lineSessionHit`）——横向换纵向，两样都不丢。
+ *
+ * 2026-09-27 改版把成功率从"独占一行"并到这行行尾：请求数与成功率本来就是
+ * 同一件事的两面（打了多少次、成没成），分成两行各占一个标签列反而浪费；
+ * 并起来之后，紧凑档砍掉历史明细行也不至于让请求数在面板上彻底消失。
  */
-export function lineSessionHit(s: Snapshot, sid: string): Seg[] {
+export function lineSessionReq(s: Snapshot, sid: string): Seg[] {
   if (!s.sessions[sid]) return [emptyCell()]
   const b = sessionBucket(s, sid)
   return [
     head("请求"),
-    seg(fmtInt(b.steps), "value"),
-    seg(" · 命中 ", "label"),
-    seg(fmtPct(hitRate(b), 2), "value"),
+    val(fmtInt(b.steps)),
+    seg(" · 成功 ", "label"),
+    seg(fmtPct(successRate(b)), "value"),
   ]
 }
 
 /**
- * 仅展开态：会话级请求成功率。
+ * 第 2 行：缓存命中率（会话树累计）· 本次命中率 + 环比。
  *
- * 成功率和命中率说的是两件事——命中率跌可能只是换了个会话、上下文重新
- * 填一遍，成功率跌则意味着请求在报错。两者会往相反方向走，都得看得见。
+ * 命中率是这个插件的主角，一次都不能少；"本次"则是它最锋利的那一面——
+ * 累计值被一长串旧请求稀释，只有最近一次请求能立刻反映"这一轮到底缓存住没住"。
  *
- * 单占一行是因为三样挤一行实测要 39 格（`请求 · 成功 · 命中` 连标签列），
- * 超侧栏 35 格就折行、把面板撑高。纵向既然宽松，就让它自己一行。
- * 折叠态与紧凑态不显示它：紧凑态下面的历史三行各带成功率，够用。
- */
-export function lineSessionSuccess(s: Snapshot, sid: string): Seg[] {
-  if (!s.sessions[sid]) return [emptyCell()]
-  const b = sessionBucket(s, sid)
-  return [head("成功"), seg(fmtPct(successRate(b)), "value")]
-}
-
-/**
- * 第 3 行：本次请求命中率 + 相对上一次请求的环比。
- *
- * 与第 2 行的"命中"不同：那行是会话树**累计**的命中率，这行只看最近一次
- * 成功的 primary 请求，能立刻反映"这一轮到底缓存住没住"。
- *
+ * - 累计与本次**不是一个口径**：前者是整棵会话子树，后者只看最近一条成功的
+ *   primary 请求，所以"本次"可能停在上一次成功的请求上。
  * - 环比用 `+` / `-` 而不是箭头：箭头在部分字体里字宽不齐、还得靠字形猜
  *   方向，`+1.9%` 直白得多。符号本身仍要靠颜色补足可扫性——
  *   升 `up`、降 `down`，不用读字就知道方向。
- * - 首条请求没有基线、或与上次持平（一位小数舍入后为 0）时不带符号，
- *   避免 `+0%` 这种噪音，两者都显示成纯命中率。
- * - 失败请求与 title / compaction / generate 不进基线（口径同 kind 过滤），
- *   所以"本次"可能停在上一次成功的请求上。
+ * - 首条请求没有基线、或与上次持平（两位小数舍入后为 0）时不带符号，
+ *   避免 `+0%` 这种噪音，只留纯命中率。
+ * - 会话没有 `recent`（旧数据快照）时**只退成本行前半段，不整行占位**：
+ *   累计值就摆在桶里，白给的信息没道理扣着不显示。
+ *
+ * **这是面板上最长的一行**：`命中(7) + 96.39%(6) + " · 本次 "(8) +
+ * 99.30%(6) + " +2.00%"(7)` = 34，最坏 `+99.99%` 正好 35 格封顶。
+ * 改这行之前先把这两个数算一遍，超了就得砍别的段——35 是硬上限（文件头）。
  */
-export function lineSessionRecent(s: Snapshot, sid: string): Seg[] {
+export function lineSessionHit(s: Snapshot, sid: string): Seg[] {
   if (!s.sessions[sid]) return [emptyCell()]
+  const cum = hitRate(sessionBucket(s, sid))
   const [cur, prev] = subtreeRecentOf(s.sessions, sid)
-  if (!cur) return [emptyCell()]
-  const base = hitRate(cur)
-  const out: Seg[] = [head("本次"), seg(fmtPct(base, 2), "value")]
-  if (prev) {
-    const delta = base - hitRate(prev)
-    // 命中率与环比都取两位小数：单次请求的命中差异常在零点几内，
-    // 一位小数会把 "+0.05%" 抹成 "0%"、让有效信息被当成持平吞掉。
-    const text = fmtPct(Math.abs(delta), 2)
-    if (text !== "0%") {
-      out.push(seg(` ${delta > 0 ? "+" : "-"}${text}`, delta > 0 ? "up" : "down"))
-    }
-  }
-  return out
-}
+  if (!cur) return [head("命中"), seg(fmtPct(cum, 2), "value")]
 
-/** 第 4 行：输入未命中 · 缓存读。 */
-export function lineSessionMissRead(s: Snapshot, sid: string): Seg[] {
-  if (!s.sessions[sid]) return [emptyCell()]
-  const b = sessionBucket(s, sid)
+  const base = hitRate(cur)
+  const delta = prev ? base - hitRate(prev) : 0
+  // 命中率与环比都取两位小数：单次请求的命中差异常在零点几内，
+  // 一位小数会把 "+0.05%" 抹成 "0%"、让有效信息被当成持平吞掉。
+  const text = fmtPct(Math.abs(delta), 2)
+  const up = text !== "0%"
   return [
-    head("未命中"),
-    seg(fmtCount(b.input), "value"),
-    seg(" · 缓存读 ", "label"),
-    seg(fmtCount(b.cacheRead), "value"),
+    head("命中"),
+    val(fmtPct(cum, 2)),
+    seg(" · 本次 ", "label"),
+    // 有环比才补空格：把 "±" 顶到固定列，同时不给行尾留一截看不见的空白
+    seg(up ? pad(fmtPct(base, 2), VALUE_W) : fmtPct(base, 2), "value"),
+    ...(up ? [seg(` ${delta > 0 ? "+" : "-"}${text}`, delta > 0 ? "up" : "down")] : []),
   ]
 }
 
 /**
- * 第 5 行：缓存写 · 输出。
+ * 第 3 行：输入 · 输出。
  *
- * 只放两档：三档（缓存写 / 输出 / 推理）连标签列要 36 格，超侧栏 35 格的
- * 上限——实测 `缓存写 54.3K · 输出 988K · 推理 656K` 就会折行。
- * 推理挪去第 6 行与费用作伴：五个口径里它按输出计费、单价最高，最能解释
- * "钱"是怎么烧掉的。
+ * 2026-09-27 改版：`未命中` 改叫 `输入`，并与 `输出` 并到同一行。
+ * 这两个才是真正"进出模型"的 token，缓存那两档是它们的旁支，于是分组改按
+ * **语义**走——未缓存的进与出一行、缓存的读与写下一行（旧版是按"数大"横切，
+ * `未命中 · 缓存读` / `缓存写 · 输出`，四档各归各家，扫的时候要来回对）。
+ *
+ * 标签从"未命中"改成"输入"还顺手省了 2 格：三字标签顶着 `LABEL_W` 只剩
+ * 1 格间隙，两字标签有 3 格空档，看着松快些。
  */
-export function lineSessionWriteOut(s: Snapshot, sid: string): Seg[] {
+export function lineSessionInOut(s: Snapshot, sid: string): Seg[] {
   if (!s.sessions[sid]) return [emptyCell()]
   const b = sessionBucket(s, sid)
   return [
-    head("缓存写"),
-    seg(fmtCount(b.cacheWrite), "value"),
+    head("输入"),
+    val(fmtCount(b.input)),
     seg(" · 输出 ", "label"),
     seg(fmtCount(b.output), "value"),
   ]
 }
 
 /**
- * 第 6 行：本次会话花了多少钱 · 花在哪档 token 上。
+ * 第 4 行：缓读 · 缓写（= 缓存读 · 缓存写）。
+ *
+ * 2026-09-27 改版让两档缓存独占一行，正是用户点名的"缓存写和读放在一行"；
+ * 同日再把两者**对调**（缓存读在前）并**缩成两字**，两条理由：
+ *
+ * 1. **缓存读才是主角**：量级在千万到亿、直接决定费用；缓存写对多数端点
+ *    恒为 0（端点不报写入量，见 §4 已知取舍）。常在前、罕在后。
+ * 2. **两字标签才对得齐**：三字 `缓存读` 占 6 格，会把这行第二个数值顶到
+ *    第 24 格，比其余行（成功 / 本次 / 输出，4 格 → 第 22 格）右移 2 格。
+ *    把别处垫到 6 格能让它齐，但最长的命中行会涨到 37 格、超 35 的硬上限——
+ *    缩标签是唯一不撞宽度上限的解法，改完四行两段的第二个数值**全在同列**。
+ *
+ * 这里只改**显示名**：字段仍是 `cacheRead`/`cacheWrite`，四档单价与命中率
+ * 分母（输入 + 缓存读 + 缓存写 = prompt 总输入）都不受影响。
+ */
+export function lineSessionCache(s: Snapshot, sid: string): Seg[] {
+  if (!s.sessions[sid]) return [emptyCell()]
+  const b = sessionBucket(s, sid)
+  return [
+    head("缓读"),
+    val(fmtCount(b.cacheRead)),
+    seg(" · 缓写 ", "label"),
+    seg(fmtCount(b.cacheWrite), "value"),
+  ]
+}
+
+/**
+ * 第 5 行：推理 token。
+ *
+ * 2026-09-27 改版从费用行里拆出来单独一行（用户："推理消耗的 token 不要和
+ * 费用写在一起，看着有点奇怪，可以上移作为独立的一行"）。拆开之后五个
+ * token 口径在面板上是**四行两列**的整齐矩阵，费用行也只剩一个金额，
+ * 不再因为推理位数不同而忽长忽短。
+ *
+ * 推理按输出计费、单价最高，单独一行也正好是"钱花在哪档 token 上"的注脚。
+ */
+export function lineSessionReasoning(s: Snapshot, sid: string): Seg[] {
+  if (!s.sessions[sid]) return [emptyCell()]
+  const b = sessionBucket(s, sid)
+  return [head("推理"), seg(fmtCount(b.reasoning), "value")]
+}
+
+/**
+ * 第 6 行：本次会话花了多少钱。
  *
  * 独占一行而不是塞在 token 行尾：钱是本会话最该被看见的数字，而且要和
  * 下面的今日/本月/累计对齐成同一列——四笔金额都从 `LABEL_W` 起跳，
- * 竖着一扫就能比大小。推理跟在后面，是"钱"最好的注脚。
+ * 竖着一扫就能比大小。
+ *
+ * 2026-09-27 改版把行尾的 `· 推理 xxx` 拿掉（推理升到上一行独立成行）。
+ * 从此这行只有一个金额，与今日/本月/累计**行形完全一致**，
+ * 也不会再因为推理位数不同而忽长忽短。
  */
 export function lineSessionCost(s: Snapshot, sid: string): Seg[] {
   if (!s.sessions[sid]) return [emptyCell()]
   const b = sessionBucket(s, sid)
-  return [
-    head("费用"),
-    seg(fmtCost(b.cost, s.currency), "money"),
-    seg(" · 推理 ", "label"),
-    seg(fmtCount(b.reasoning), "value"),
-  ]
+  return [head("费用"), seg(fmtCost(b.cost, s.currency), "money")]
 }
 
 /**
@@ -418,9 +517,12 @@ export function lineRuleBottom(): Seg[] {
 /**
  * 面板密度三档，决定显示哪些行、以及历史行要不要拆成两行。
  *
- * - `full`（默认）：全部指标，14 行。35 格装不下的内容拆到第二行
+ * - `full`（默认）：16 行。35 格装不下的内容拆到第二行
  *   （历史三行各带一条明细），纵向空间换横向宽度。
- * - `compact`：10 行，每个口径压成一行，代价是丢掉会话级成功率与历史请求数。
+ * - `compact`：13 行 = 展开档去掉三条历史明细行。**会话块一行不动**——
+ *   改版后那六行各管一件事（请求/命中/输入/缓存/推理/费用），
+ *   摘掉哪行都是真丢信息；而历史明细里唯一的重复量（成功率）
+ *   本来就已经并进历史第一行了，紧缩档省下来的只有"请求数"。
  * - `collapsed`：只剩标题与费用，2 行。
  *
  * 三档共用同一套行函数和同一个标签列，所以切换只是"显示/隐藏某些行"，
@@ -439,9 +541,13 @@ export function isPanelLayout(v: unknown): v is PanelLayout {
 /**
  * 今日 / 本月 / 累计的第一行：标签 + 金额（+ 紧凑态的成功率）。
  *
- * `compact` 只有一行可用来承接这个口径，所以成功率直接跟在金额后面。
- * `full` 把成功率和请求数交给第二行，这里只留金额——于是会话费用、
+ * `compact` 只有一行可用来承接这个口径，所以成功率直接跟在金额后面；
+ * `full` 把成功率与请求数交给第二行，这里只留金额——于是会话费用、
  * 今日、本月、累计**四笔金额竖在同一列**，一扫就能比大小。
+ *
+ * 紧凑态的金额要补到 `MONEY_W`：三行的金额长短不一（`¥1.23` 与
+ * `¥1,234.50`），不补的话后面的 `· 成功` 各起各的列，竖着一看就是错位
+ * （同 `VALUE_W` 的由来，见文件头第 2 条原则）。
  */
 function historyLine(
   label: string,
@@ -449,29 +555,37 @@ function historyLine(
   b: Bucket,
   layout: PanelLayout,
 ): Seg[] {
-  const out: Seg[] = [head(label), seg(fmtCost(b.cost, s.currency), "money")]
-  if (layout === "compact") {
-    out.push(seg(" · ", "label"))
-    out.push(seg(fmtPct(successRate(b)), "value"))
-    out.push(seg(" 成功", "label"))
-  }
-  return out
+  const money = fmtCost(b.cost, s.currency)
+  if (layout !== "compact") return [head(label), seg(money, "money")]
+  return [
+    head(label),
+    seg(pad(money, MONEY_W), "money"),
+    seg(" · ", "label"),
+    pct1(successRate(b)),
+    seg(" 成功", "label"),
+  ]
 }
 
 /**
- * 仅展开态：历史口径的第二行，承接紧凑态塞不下的成功率与请求数。
+ * 仅展开态：历史口径的第二行，承接紧凑态塞不下的请求数。
  *
- * 行首缩进 `LABEL_W` 而不是从 0 起——数值与上一行的金额左对齐，
- * 读起来是上一行的下半截，而不是又冒出一个没有标签的新条目。
+ * 2026-09-27 改版把两段对调：`成功率 · 请求数` → `请求数 · 成功率`，
+ * 与会话块第 1 行（`请求 N · 成功 P%`）同一个读法——先说打了多少次、
+ * 再说成没成，三行历史明细之间也彼此对得上。
+ *
+ * 行首缩进 `LABEL_W` 而不是从 0 起，第一个数值与上一行的金额左对齐，
+ * 读起来是上一行的下半截，而不是又冒出一个没有标签的新条目；
+ * 请求数补到 `DETAIL_W`（不是会话块的 `VALUE_W`——累计请求是几十万的量级），
+ * 三条明细的 `· 成功` 才竖在同一列。
  */
 function historyDetail(s: Snapshot, b: Bucket): Seg[] {
   return [
     seg(" ".repeat(LABEL_W), "label"),
-    seg(fmtPct(successRate(b)), "value"),
-    seg(" 成功", "label"),
-    seg(" · ", "label"),
-    seg(fmtInt(b.steps), "value"),
+    seg(pad(fmtInt(b.steps), DETAIL_W), "value"),
     seg(" 请求", "label"),
+    seg(" · ", "label"),
+    pct1(successRate(b)),
+    seg(" 成功", "label"),
   ]
 }
 
@@ -535,11 +649,11 @@ export interface PanelLine {
 export const FULL_ORDER = [
   "lineRuleTop",
   "lineHeader",
+  "lineSessionReq",
   "lineSessionHit",
-  "lineSessionSuccess",
-  "lineSessionRecent",
-  "lineSessionMissRead",
-  "lineSessionWriteOut",
+  "lineSessionInOut",
+  "lineSessionCache",
+  "lineSessionReasoning",
   "lineSessionCost",
   "lineDivider",
   "lineToday",
@@ -558,12 +672,14 @@ export const FULL_ORDER = [
  * 中间那几行被摘掉后，标题后面紧跟的就是费用。顺序定义只有一处。
  *
  * 折叠态还要额外滤掉首尾两条边框线——它只留两行内容，不该再花两行画框。
+ *
+ * 紧凑档只滤历史明细：改版（2026-09-27）把会话块压成"六行各管一件事"，
+ * 没有哪行是可有可无的；唯一的冗余在历史区——明细行里的成功率早已经
+ * 并进历史第一行，被滤掉的其实只有"请求数"这一个数。
  */
 export const LAYOUT_LINES: Record<PanelLayout, readonly string[]> = {
   full: FULL_ORDER,
-  compact: FULL_ORDER.filter(
-    (name) => name !== "lineSessionSuccess" && !name.endsWith("Detail"),
-  ),
+  compact: FULL_ORDER.filter((name) => !name.endsWith("Detail")),
   collapsed: FULL_ORDER.filter(
     (name) => name === "lineHeader" || name === "lineSessionCost",
   ),
@@ -596,11 +712,11 @@ function allLines(
 ): Record<string, Seg[]> {
   return {
     lineHeader: lineHeader(s, sid),
+    lineSessionReq: lineSessionReq(s, sid),
     lineSessionHit: lineSessionHit(s, sid),
-    lineSessionSuccess: lineSessionSuccess(s, sid),
-    lineSessionRecent: lineSessionRecent(s, sid),
-    lineSessionMissRead: lineSessionMissRead(s, sid),
-    lineSessionWriteOut: lineSessionWriteOut(s, sid),
+    lineSessionInOut: lineSessionInOut(s, sid),
+    lineSessionCache: lineSessionCache(s, sid),
+    lineSessionReasoning: lineSessionReasoning(s, sid),
     lineSessionCost: lineSessionCost(s, sid),
     lineDivider: lineDivider(),
     lineRuleTop: lineRuleTop(),

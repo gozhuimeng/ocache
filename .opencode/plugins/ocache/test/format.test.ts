@@ -9,6 +9,10 @@ import {
   NO_DATA,
   DIVIDER,
   LABEL_W,
+  VALUE_W,
+  MONEY_W,
+  DETAIL_W,
+  PCT1_W,
   FULL_ORDER,
   LAYOUT_LINES,
   PANEL_LAYOUTS,
@@ -16,11 +20,11 @@ import {
   isPanelLayout,
   show,
   lineHeader,
+  lineSessionReq,
   lineSessionHit,
-  lineSessionSuccess,
-  lineSessionRecent,
-  lineSessionMissRead,
-  lineSessionWriteOut,
+  lineSessionInOut,
+  lineSessionCache,
+  lineSessionReasoning,
   lineSessionCost,
   lineToday,
   lineTodayDetail,
@@ -264,30 +268,39 @@ describe("面板行", () => {
 
   test("无数据的会话每行给占位而不是一串 0", () => {
     // 占位落在标签列**之后**（trim 掉前导补空再断言内容）
-    assert.equal(plain(lineSessionHit(s, "未见过")).trim(), NO_DATA)
-    assert.equal(plain(lineSessionMissRead(s, "未见过")).trim(), NO_DATA)
-    assert.equal(plain(lineSessionWriteOut(s, "未见过")).trim(), NO_DATA)
-    assert.equal(plain(lineSessionCost(s, "未见过")).trim(), NO_DATA)
-    assert.equal(plain(lineSessionHit(s, "未见过")).length, LABEL_W + NO_DATA.length)
+    for (const line of [
+      lineSessionReq(s, "未见过"),
+      lineSessionHit(s, "未见过"),
+      lineSessionInOut(s, "未见过"),
+      lineSessionCache(s, "未见过"),
+      lineSessionReasoning(s, "未见过"),
+      lineSessionCost(s, "未见过"),
+    ]) {
+      assert.equal(plain(line).trim(), NO_DATA)
+      assert.equal(plain(line).length, LABEL_W + NO_DATA.length)
+    }
   })
 
-  test("行文案包含请求量、命中率、五个 token 口径与费用", () => {
+  test("行文案：请求·成功 / 命中 / 输入·输出 / 缓读·缓写 / 推理 / 费用", () => {
+    // 每行第一段数值都补到 VALUE_W（这里用 padEnd 展开，好看出补了几个空格），
+    // 后面的 `·` 与第二个标签才能落在固定列上
     assert.equal(
-      plain(lineSessionHit(s, "s1")),
-      `请求${" ".repeat(3)}5 · 命中 96.39%`,
+      plain(lineSessionReq(s, "s1")),
+      `请求${" ".repeat(3)}${"5".padEnd(VALUE_W)} · 成功 80%`,
+    )
+    // 会话没有 recent：命中行退成只有累计段，不整行占位
+    assert.equal(plain(lineSessionHit(s, "s1")), `命中${" ".repeat(3)}96.39%`)
+    assert.equal(
+      plain(lineSessionInOut(s, "s1")),
+      `输入${" ".repeat(3)}${"1.2K".padEnd(VALUE_W)} · 输出 1.5K`,
     )
     assert.equal(
-      plain(lineSessionMissRead(s, "s1")),
-      `未命中${" ".repeat(1)}1.2K · 缓存读 56.8K`,
+      plain(lineSessionCache(s, "s1")),
+      `缓读${" ".repeat(3)}${"56.8K".padEnd(VALUE_W)} · 缓写 890`,
     )
-    assert.equal(
-      plain(lineSessionWriteOut(s, "s1")),
-      `缓存写${" ".repeat(1)}890 · 输出 1.5K`,
-    )
-    assert.equal(
-      plain(lineSessionCost(s, "s1")),
-      `费用${" ".repeat(3)}¥0.0234 · 推理 900`,
-    )
+    assert.equal(plain(lineSessionReasoning(s, "s1")), `推理${" ".repeat(3)}900`)
+    // 推理不在费用行里了：金额是这行唯一的内容
+    assert.equal(plain(lineSessionCost(s, "s1")), `费用${" ".repeat(3)}¥0.0234`)
   })
 
   test("历史三口径按 agg 缺失降级", () => {
@@ -328,11 +341,19 @@ describe("面板行", () => {
         },
       },
     })
-    assert.equal(plain(lineToday(withAgg)), `今日${" ".repeat(3)}¥0.045 · 100% 成功`)
-    assert.equal(plain(lineMonth(withAgg)), `本月${" ".repeat(3)}¥1.23 · 99.1% 成功`)
+    // 紧凑档金额补到 MONEY_W、成功率补到 PCT1_W：三行金额长短不一、
+    // `100%` 比 `99.1%` 短一格，不补的话 `· 成功` 各起各的列
+    assert.equal(
+      plain(lineToday(withAgg)),
+      `今日${" ".repeat(3)}${"¥0.045".padEnd(MONEY_W)} · ${"100%".padEnd(PCT1_W)} 成功`,
+    )
+    assert.equal(
+      plain(lineMonth(withAgg)),
+      `本月${" ".repeat(3)}${"¥1.23".padEnd(MONEY_W)} · ${"99.1%".padEnd(PCT1_W)} 成功`,
+    )
     assert.equal(
       plain(lineTotal(withAgg)),
-      `累计${" ".repeat(3)}¥5.67 · 99.7% 成功`,
+      `累计${" ".repeat(3)}${"¥5.67".padEnd(MONEY_W)} · ${"99.7%".padEnd(PCT1_W)} 成功`,
     )
 
     const empty = snap({ agg: null })
@@ -348,37 +369,51 @@ describe("本次命中率与环比", () => {
   /** 239/250 = 95.6% */
   const LO = { input: 11, cacheRead: 239, cacheWrite: 0 }
   const at = (ts: number, t: typeof HI) => ({ ts, ...t })
+  /**
+   * 本组的会话。命中行前半段的**累计**值取自会话桶，所以桶不能空着——
+   * 固定成 3/4 = 75%，于是每条断言的前半截恒定，后半截才是被测的"本次 + 环比"。
+   */
+  const hit = (over: Partial<SessionSnapshot> & { session_id: string }) =>
+    sess({ input: 1, cache_read: 3, cache_write: 0, ...over })
   /** 该行拼成的整串：文案与分段分开断言，这里只看"写了什么"。 */
-  const row = (s: Snapshot, sid: string) => plain(lineSessionRecent(s, sid))
+  const row = (s: Snapshot, sid: string) => plain(lineSessionHit(s, sid))
+  /** 命中行的固定前缀：累计值补到 VALUE_W，`· 本次` 因此落在固定列。 */
+  const HEAD = `命中${" ".repeat(3)}${"75%".padEnd(VALUE_W)} · 本次 `
 
   test("首次请求没有基线：只显示命中率，不带符号", () => {
-    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI)] }) } })
-    assert.equal(row(s, "s1"), `本次${" ".repeat(3)}97.50%`)
+    const s = snap({ sessions: { s1: hit({ session_id: "s1", recent: [at(200, HI)] }) } })
+    assert.equal(row(s, "s1"), HEAD + `97.50%`)
   })
 
   test("上升带 +、下降带 -，不用箭头", () => {
-    const up = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, LO)] }) } })
-    assert.equal(row(up, "s1"), `本次${" ".repeat(3)}97.50% +1.90%`)
+    const up = snap({
+      sessions: { s1: hit({ session_id: "s1", recent: [at(200, HI), at(100, LO)] }) },
+    })
+    assert.equal(row(up, "s1"), HEAD + `97.50% +1.90%`)
 
-    const down = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, LO), at(100, HI)] }) } })
-    assert.equal(row(down, "s1"), `本次${" ".repeat(3)}95.60% -1.90%`)
+    const down = snap({
+      sessions: { s1: hit({ session_id: "s1", recent: [at(200, LO), at(100, HI)] }) },
+    })
+    assert.equal(row(down, "s1"), HEAD + `95.60% -1.90%`)
 
     // 符号之外还得有颜色：光靠 +/- 在弱光下扫不出来
-    assert.equal(lineSessionRecent(up, "s1").at(-1)?.tone, "up")
-    assert.equal(lineSessionRecent(down, "s1").at(-1)?.tone, "down")
-    // 段序固定：标签 → 数值 → 环比（环比独占一段才能单独上色）
+    assert.equal(lineSessionHit(up, "s1").at(-1)?.tone, "up")
+    assert.equal(lineSessionHit(down, "s1").at(-1)?.tone, "down")
+    // 段序固定：标签 → 数值 → 分隔 → 标签 → 数值 → 环比（环比独占一段才能单独上色）
     assert.deepEqual(
-      lineSessionRecent(up, "s1").map((g) => g.tone),
-      ["label", "value", "up"],
+      lineSessionHit(up, "s1").map((g) => g.tone),
+      ["label", "value", "label", "value", "up"],
     )
   })
 
   test("与上次持平不显示 +0%", () => {
-    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, HI), at(100, HI)] }) } })
-    assert.equal(row(s, "s1"), `本次${" ".repeat(3)}97.50%`)
+    const s = snap({
+      sessions: { s1: hit({ session_id: "s1", recent: [at(200, HI), at(100, HI)] }) },
+    })
+    assert.equal(row(s, "s1"), HEAD + `97.50%`)
     assert.deepEqual(
-      lineSessionRecent(s, "s1").map((g) => g.tone),
-      ["label", "value"],
+      lineSessionHit(s, "s1").map((g) => g.tone),
+      ["label", "value", "label", "value"],
     )
   })
 
@@ -389,41 +424,44 @@ describe("本次命中率与环比", () => {
     // 两位小数才能读出确切的 "+0.25%"
     const A = { input: 3, cacheRead: 197, cacheWrite: 0 }
     const B = { input: 5, cacheRead: 395, cacheWrite: 0 }
-    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, B), at(100, A)] }) } })
-    assert.equal(row(s, "s1"), `本次${" ".repeat(3)}98.75% +0.25%`)
+    const s = snap({
+      sessions: { s1: hit({ session_id: "s1", recent: [at(200, B), at(100, A)] }) },
+    })
+    assert.equal(row(s, "s1"), HEAD + `98.75% +0.25%`)
   })
 
   test("整百分比不带小数尾巴，避免 97.00% 这种噪音", () => {
     const FULL = { input: 0, cacheRead: 100, cacheWrite: 0 } // 100%
-    const s = snap({ sessions: { s1: sess({ session_id: "s1", recent: [at(200, FULL)] }) } })
-    assert.equal(row(s, "s1"), `本次${" ".repeat(3)}100%`)
+    const s = snap({ sessions: { s1: hit({ session_id: "s1", recent: [at(200, FULL)] }) } })
+    assert.equal(row(s, "s1"), HEAD + `100%`)
   })
 
   test("子树跨会话取全局最近两条，而不是各取各的", () => {
     const s = snap({
       sessions: {
-        root: sess({ session_id: "root", recent: [at(300, HI), at(50, HI)] }),
-        child: sess({ session_id: "child", parent_id: "root", recent: [at(200, LO)] }),
+        root: hit({ session_id: "root", recent: [at(300, HI), at(50, HI)] }),
+        child: hit({ session_id: "child", parent_id: "root", recent: [at(200, LO)] }),
       },
     })
     // 正确取法：300 的 HI 与 200 的 LO → +1.90%
     // 若退化成"只看 root 自己两条"，会得到两条 HI → 无符号
-    assert.equal(row(s, "root"), `本次${" ".repeat(3)}97.50% +1.90%`)
+    assert.equal(row(s, "root"), HEAD + `97.50% +1.90%`)
     // 子会话自己的子树只有一条，没有基线 → 不带符号
-    assert.equal(row(s, "child"), `本次${" ".repeat(3)}95.60%`)
+    assert.equal(row(s, "child"), HEAD + `95.60%`)
   })
 
-  test("会话还没写过成功请求、或未见过该会话 → 占位", () => {
-    assert.equal(plain(lineSessionRecent(snap({ sessions: {} }), "没有")).trim(), NO_DATA)
-    const none = snap({ sessions: { s1: sess({ session_id: "s1" }) } })
-    assert.equal(plain(lineSessionRecent(none, "s1")).trim(), NO_DATA)
+  test("未见过的会话整行占位，见过但没 recent 的只退掉后半段", () => {
+    assert.equal(plain(lineSessionHit(snap({ sessions: {} }), "没有")).trim(), NO_DATA)
+    // 累计命中率就在桶里，白给的信息没道理扣着不显示——只把"本次"摘掉
+    const none = snap({ sessions: { s1: hit({ session_id: "s1" }) } })
+    assert.equal(plain(lineSessionHit(none, "s1")), `命中${" ".repeat(3)}75%`)
   })
 
   test("子树最近两条按 ts 倒序，超出两条的直接丢弃", () => {
     const s = snap({
       sessions: {
-        root: sess({ session_id: "root", recent: [at(10, HI), at(90, LO)] }),
-        child: sess({ session_id: "child", parent_id: "root", recent: [at(50, HI), at(70, LO), at(30, HI)] }),
+        root: hit({ session_id: "root", recent: [at(10, HI), at(90, LO)] }),
+        child: hit({ session_id: "child", parent_id: "root", recent: [at(50, HI), at(70, LO), at(30, HI)] }),
       },
     })
     const got = subtreeRecentOf(s.sessions, "root")
@@ -431,6 +469,30 @@ describe("本次命中率与环比", () => {
       got.map((e) => e.ts),
       [90, 70],
     )
+  })
+
+  /**
+   * 命中行是面板上最长的一行（文件头的 35 格硬约束就卡在它身上）。
+   * 最坏组合：累计、本次、环比三段全是两位小数且都顶到 99.99%。
+   * 算得 `7 + 6 + 8 + 6 + 8 = 35`——正好封顶，再长一个格就折行。
+   */
+  test("最坏情况（99.99% / 99.99% / +99.99%）正好 35 格", () => {
+    const fat = snap({
+      sessions: {
+        s1: hit({
+          session_id: "s1",
+          input: 1,
+          cache_read: 9999,
+          recent: [
+            { ts: 200, input: 1, cacheRead: 9999, cacheWrite: 0 },
+            { ts: 100, input: 10000, cacheRead: 0, cacheWrite: 0 },
+          ],
+        }),
+      },
+    })
+    const text = plain(lineSessionHit(fat, "s1"))
+    assert.equal(text, `命中${" ".repeat(3)}99.99% · 本次 99.99% +99.99%`)
+    assert.equal(width(text), 35)
   })
 })
 
@@ -512,15 +574,15 @@ describe("整块面板端到端断言（M5/A2）", () => {
   }
   const s = snap({ updated: 1, record: true, sessions, agg })
 
-  test("三档布局行数：展开 16 / 紧凑 12 / 折叠 2", () => {
-    // 展开 = 16（14 行内容 + 上下两条边框线）；紧凑同理 12；
+  test("三档布局行数：展开 16 / 紧凑 13 / 折叠 2", () => {
+    // 展开 = 16（14 行内容 + 上下两条边框线）；紧凑 = 16 − 3 条历史明细；
     // 折叠只留 2 行内容、不画边框（见 lineRuleTop 的说明）
     assert.equal(renderPanel(s, "root", "full").length, 16)
-    assert.equal(renderPanel(s, "root", "compact").length, 12)
+    assert.equal(renderPanel(s, "root", "compact").length, 13)
     assert.equal(renderPanel(s, "root", "collapsed").length, 2)
     // 没有任何数据也必须是同样的行数——占位行不能把面板撑塌或撑高
     assert.equal(renderPanel(snap({}), "x", "full").length, 16)
-    assert.equal(renderPanel(snap({}), "x", "compact").length, 12)
+    assert.equal(renderPanel(snap({}), "x", "compact").length, 13)
     assert.equal(renderPanel(snap({}), "x", "collapsed").length, 2)
   })
 
@@ -543,52 +605,54 @@ describe("整块面板端到端断言（M5/A2）", () => {
     assert.deepEqual(got, ["lineHeader", "lineSessionCost"])
     assert.deepEqual(
       renderPanel(s, "root", "collapsed").map((l) => l.text),
-      ["ocache +1 子会话 · ● 记录中", `费用${" ".repeat(3)}¥1.30 · 推理 3.2K`],
+      ["ocache +1 子会话 · ● 记录中", `费用${" ".repeat(3)}¥1.30`],
     )
   })
 
-  test("紧凑档十二行逐行断言：上下有边框 + 子会话聚合 + 两位小数命中率 + 三口径", () => {
+  test("紧凑档十三行逐行断言：会话块一行不删，只砍历史明细", () => {
     assert.deepEqual(
       renderPanel(s, "root", "compact").map((l) => l.text),
       [
         DIVIDER,
         "ocache +1 子会话 · ● 记录中",
-        `请求${" ".repeat(3)}105 · 命中 98.93%`,
-        `本次${" ".repeat(3)}97.50% +1.90%`,
-        `未命中${" ".repeat(1)}1.6K · 缓存读 148K`,
-        `缓存写${" ".repeat(1)}0 · 输出 5.3K`,
-        `费用${" ".repeat(3)}¥1.30 · 推理 3.2K`,
+        `请求${" ".repeat(3)}${"105".padEnd(VALUE_W)} · 成功 99%`,
+        `命中${" ".repeat(3)}98.93% · 本次 97.50% +1.90%`,
+        `输入${" ".repeat(3)}${"1.6K".padEnd(VALUE_W)} · 输出 5.3K`,
+        `缓读${" ".repeat(3)}${"148K".padEnd(VALUE_W)} · 缓写 0`,
+        `推理${" ".repeat(3)}3.2K`,
+        `费用${" ".repeat(3)}¥1.30`,
         DIVIDER,
-        `今日${" ".repeat(3)}¥0.045 · 100% 成功`,
-        `本月${" ".repeat(3)}¥1.23 · 99.1% 成功`,
-        `累计${" ".repeat(3)}¥1,234.50 · 99.6% 成功`,
+        // 紧凑档的钱后面跟着成功率，三行金额补到 MONEY_W 才不各起各的列
+        `今日${" ".repeat(3)}${"¥0.045".padEnd(MONEY_W)} · ${"100%".padEnd(PCT1_W)} 成功`,
+        `本月${" ".repeat(3)}${"¥1.23".padEnd(MONEY_W)} · ${"99.1%".padEnd(PCT1_W)} 成功`,
+        `累计${" ".repeat(3)}${"¥1,234.50".padEnd(MONEY_W)} · ${"99.6%".padEnd(PCT1_W)} 成功`,
         DIVIDER,
       ],
     )
   })
 
-  test("展开档十六行逐行断言：上下边框 + 会话级成功率 + 三条历史明细", () => {
+  test("展开档十六行逐行断言：上下边框 + 请求·成功 + 三条历史明细", () => {
     assert.deepEqual(
       renderPanel(s, "root", "full").map((l) => l.text),
       [
         DIVIDER,
         "ocache +1 子会话 · ● 记录中",
-        `请求${" ".repeat(3)}105 · 命中 98.93%`,
         // 104/105 = 99.05% → 一位小数 99.0 → 整百分比去尾巴 = 99%
-        `成功${" ".repeat(3)}99%`,
-        `本次${" ".repeat(3)}97.50% +1.90%`,
-        `未命中${" ".repeat(1)}1.6K · 缓存读 148K`,
-        `缓存写${" ".repeat(1)}0 · 输出 5.3K`,
-        `费用${" ".repeat(3)}¥1.30 · 推理 3.2K`,
+        `请求${" ".repeat(3)}${"105".padEnd(VALUE_W)} · 成功 99%`,
+        `命中${" ".repeat(3)}98.93% · 本次 97.50% +1.90%`,
+        `输入${" ".repeat(3)}${"1.6K".padEnd(VALUE_W)} · 输出 5.3K`,
+        `缓读${" ".repeat(3)}${"148K".padEnd(VALUE_W)} · 缓写 0`,
+        `推理${" ".repeat(3)}3.2K`,
+        `费用${" ".repeat(3)}¥1.30`,
         DIVIDER,
         // 展开档的历史行：第一行只留金额（四笔金额因此竖在同一列），
-        // 成功率与请求数缩进到标签列之后作第二行
+        // 请求数与成功率缩进到标签列之后作第二行
         `今日${" ".repeat(3)}¥0.045`,
-        `${" ".repeat(7)}100% 成功 · 12 请求`,
+        `${" ".repeat(7)}${"12".padEnd(DETAIL_W)} 请求 · ${"100%".padEnd(PCT1_W)} 成功`,
         `本月${" ".repeat(3)}¥1.23`,
-        `${" ".repeat(7)}99.1% 成功 · 340 请求`,
+        `${" ".repeat(7)}${"340".padEnd(DETAIL_W)} 请求 · ${"99.1%".padEnd(PCT1_W)} 成功`,
         `累计${" ".repeat(3)}¥1,234.50`,
-        `${" ".repeat(7)}99.6% 成功 · 12,345 请求`,
+        `${" ".repeat(7)}${"12,345".padEnd(DETAIL_W)} 请求 · ${"99.6%".padEnd(PCT1_W)} 成功`,
         DIVIDER,
       ],
     )
@@ -606,6 +670,7 @@ describe("整块面板端到端断言（M5/A2）", () => {
 
   test("会话毫无数据：标题行照常，会话块整片占位，历史三口径不受影响", () => {
     const empty = snap({ updated: 1, record: true, agg })
+    // 紧凑档与展开档的会话块行数相同（紧凑只砍历史明细），占位因此一样长
     assert.deepEqual(
       renderPanel(empty, "没见过的会话", "compact").map((l) => l.text),
       [
@@ -616,14 +681,15 @@ describe("整块面板端到端断言（M5/A2）", () => {
         EMPTY_CELL,
         EMPTY_CELL,
         EMPTY_CELL,
+        EMPTY_CELL,
         DIVIDER,
-        `今日${" ".repeat(3)}¥0.045 · 100% 成功`,
-        `本月${" ".repeat(3)}¥1.23 · 99.1% 成功`,
-        `累计${" ".repeat(3)}¥1,234.50 · 99.6% 成功`,
+        `今日${" ".repeat(3)}${"¥0.045".padEnd(MONEY_W)} · ${"100%".padEnd(PCT1_W)} 成功`,
+        `本月${" ".repeat(3)}${"¥1.23".padEnd(MONEY_W)} · ${"99.1%".padEnd(PCT1_W)} 成功`,
+        `累计${" ".repeat(3)}${"¥1,234.50".padEnd(MONEY_W)} · ${"99.6%".padEnd(PCT1_W)} 成功`,
         DIVIDER,
       ],
     )
-    // 展开档的占位比紧凑档多一行（会话级成功率），明细行则照常有值
+    // 展开档多出来的是三条历史明细，会话块照旧整片占位
     assert.deepEqual(
       renderPanel(empty, "没见过的会话", "full").map((l) => l.text),
       [
@@ -637,11 +703,11 @@ describe("整块面板端到端断言（M5/A2）", () => {
         EMPTY_CELL,
         DIVIDER,
         `今日${" ".repeat(3)}¥0.045`,
-        `${" ".repeat(7)}100% 成功 · 12 请求`,
+        `${" ".repeat(7)}${"12".padEnd(DETAIL_W)} 请求 · ${"100%".padEnd(PCT1_W)} 成功`,
         `本月${" ".repeat(3)}¥1.23`,
-        `${" ".repeat(7)}99.1% 成功 · 340 请求`,
+        `${" ".repeat(7)}${"340".padEnd(DETAIL_W)} 请求 · ${"99.1%".padEnd(PCT1_W)} 成功`,
         `累计${" ".repeat(3)}¥1,234.50`,
-        `${" ".repeat(7)}99.6% 成功 · 12,345 请求`,
+        `${" ".repeat(7)}${"12,345".padEnd(DETAIL_W)} 请求 · ${"99.6%".padEnd(PCT1_W)} 成功`,
         DIVIDER,
       ],
     )
@@ -657,10 +723,11 @@ describe("整块面板端到端断言（M5/A2）", () => {
     assert.equal(full[15], DIVIDER)
     for (const i of [9, 10, 11, 12, 13, 14]) assert.equal(full[i], EMPTY_CELL)
     const compact = renderPanel(noAgg, "root", "compact").map((l) => l.text)
-    assert.equal(compact.length, 12)
+    assert.equal(compact.length, 13)
+    // 紧凑档：行 0 上沿 / 行 1 标题 / 行 2-7 会话块 / 行 8 中缝 / 行 12 下沿
     assert.equal(compact[0], DIVIDER)
-    assert.equal(compact[7], DIVIDER)
-    for (const i of [8, 9, 10]) assert.equal(compact[i], EMPTY_CELL)
+    assert.equal(compact[8], DIVIDER)
+    for (const i of [9, 10, 11]) assert.equal(compact[i], EMPTY_CELL)
     // 折叠档只看标题与费用，历史缺不缺都与它无关
     assert.equal(renderPanel(noAgg, "root", "collapsed").length, 2)
   })
@@ -770,6 +837,17 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
     return -1
   }
 
+  /**
+   * 某段文字的起始**显示格**（0 起），找不到返回 -1。
+   * 用 `text.indexOf` 直接拿下标当列会把中文数成 1 格，整列全排歪——
+   * 列断言必须先按格切片再量宽。
+   */
+  function atCol(text: string, needle: string): number {
+    if (needle === "") return -1
+    const i = text.indexOf(needle)
+    return i < 0 ? -1 : width(text.slice(0, i))
+  }
+
   test("显示宽度按格算：CJK 计 2 格、ASCII 计 1 格", () => {
     assert.equal(width(""), 0)
     assert.equal(width("abc"), 3)
@@ -783,10 +861,11 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
 
   test("所有行的第一个数值都从 LABEL_W 起跳", () => {
     const lines = [
+      lineSessionReq(s, "s1"),
       lineSessionHit(s, "s1"),
-      lineSessionRecent(s, "s1"),
-      lineSessionMissRead(s, "s1"),
-      lineSessionWriteOut(s, "s1"),
+      lineSessionInOut(s, "s1"),
+      lineSessionCache(s, "s1"),
+      lineSessionReasoning(s, "s1"),
       lineSessionCost(s, "s1"),
       lineToday(s),
       lineMonth(s),
@@ -794,6 +873,74 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
     ]
     for (const segs of lines) {
       assert.equal(firstValueCol(segs), LABEL_W, plain(segs))
+    }
+  })
+
+  /**
+   * 2026-09-27 改版的核心：一行两段的行不能靠手插空格排。
+   * 第一个数值补到 `VALUE_W`，`·` 与第二个标签因此钉死在固定的格上——
+   * 数值从 `4` 到 `987.7M` 长短不一，这三个位置一格都不许动。
+   */
+  test("会话块四行两段：`·`、第二个标签、第二个数值三处全在同列", () => {
+    // 数值故意拉得长短不一：请求 4、命中 100%、输入 1.2K、缓读 987.7M
+    const varied = snap({
+      updated: 1,
+      record: true,
+      sessions: {
+        a: sess({
+          session_id: "a",
+          steps: 4,
+          ok: 4,
+          input: 1234,
+          cache_read: 987654321,
+          cache_write: 890,
+          output: 5678,
+          reasoning: 999,
+          cost: 0.5,
+          recent: [{ ts: 1, input: 1, cacheRead: 39, cacheWrite: 0 }],
+        }),
+      },
+    })
+    const rows: Array<[Seg[], string]> = [
+      [lineSessionReq(varied, "a"), "成功"],
+      [lineSessionHit(varied, "a"), "本次"],
+      [lineSessionInOut(varied, "a"), "输出"],
+      [lineSessionCache(varied, "a"), "缓写"],
+    ]
+    for (const [segs, second] of rows) {
+      const text = plain(segs)
+      assert.equal(atCol(text, "·"), LABEL_W + VALUE_W + 1, text)
+      assert.equal(atCol(text, second), LABEL_W + VALUE_W + 3, text)
+    }
+    // 第四个位置——第二个数值。四行的第二标签一律 2 字（4 格），四个数值因此
+    // 必须落在同一格。这正是缓存那行从 `缓存读`/`缓存写` 改成 `缓读`/`缓写`
+    // 的全部动机：三字标签占 6 格，会把该行数值顶到第 24 格、比别的行右移
+    // 2 格，而把别处垫到 6 格会让最长的命中行涨到 37 格、超 35 的硬上限。
+    // 谁把任一标签改长，这条断言会立刻歪掉，逼着重算宽度预算。
+    for (const [segs, second] of rows) {
+      const text = plain(segs)
+      const value = text.slice(text.indexOf(second) + second.length + 1)
+      assert.equal(atCol(text, value), LABEL_W + VALUE_W + 8, text)
+    }
+  })
+
+  test("紧凑档三行历史：金额与成功率各补到位，`· 成功` 竖在一列", () => {
+    for (const segs of [lineToday(s), lineMonth(s), lineTotal(s)]) {
+      const text = plain(segs)
+      assert.equal(atCol(text, "·"), LABEL_W + MONEY_W + 1, text)
+      assert.equal(atCol(text, "成功"), LABEL_W + MONEY_W + PCT1_W + 4, text)
+    }
+  })
+
+  test("三条历史明细：请求数与 `成功` 同列，且与上一行的金额左对齐", () => {
+    // 明细行 = 缩进 LABEL_W + 请求数 DETAIL_W + " 请求" + " · " + 成功率 + " 成功"
+    const REQ = width(" 请求")
+    for (const segs of [lineTodayDetail(s), lineMonthDetail(s), lineTotalDetail(s)]) {
+      const text = plain(segs)
+      // 行首缩进 LABEL_W 之后就是数值列，和上一行的金额同一起点
+      assert.equal(firstValueCol(segs), LABEL_W, text)
+      assert.equal(atCol(text, "·"), LABEL_W + DETAIL_W + REQ + 1, text)
+      assert.equal(atCol(text, "成功"), LABEL_W + DETAIL_W + REQ + 3 + PCT1_W + 1, text)
     }
   })
 
@@ -805,15 +952,25 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
   })
 
   test("标签弱化、数值放亮、金额单独强调", () => {
-    // 请求量行：标签/数值交替，分隔符跟着标签一起弱化
+    // 请求行：标签/数值交替，分隔符跟着标签一起弱化
+    assert.deepEqual(
+      lineSessionReq(s, "s1").map((g) => g.tone),
+      ["label", "value", "label", "value"],
+    )
+    // 命中行同形（这里没有基线，环比那一段缺席）
     assert.deepEqual(
       lineSessionHit(s, "s1").map((g) => g.tone),
       ["label", "value", "label", "value"],
     )
-    // 费用行：钱用 money，跟在后面的推理 token 仍是普通数值
+    // 推理行：标签 + 一个数值，再没别的
+    assert.deepEqual(
+      lineSessionReasoning(s, "s1").map((g) => g.tone),
+      ["label", "value"],
+    )
+    // 费用行：只剩金额——推理拆出去独立成行，行尾没有尾巴了
     assert.deepEqual(
       lineSessionCost(s, "s1").map((g) => g.tone),
-      ["label", "money", "label", "value"],
+      ["label", "money"],
     )
     // 历史三行同形
     assert.deepEqual(lineTotal(s).map((g) => g.tone), lineToday(s).map((g) => g.tone))
@@ -880,7 +1037,7 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
         )
       }
     }
-    assert.equal(seen, 16 + 12 + 2, "三档行数之和变了")
+    assert.equal(seen, 16 + 13 + 2, "三档行数之和变了")
   })
 
   /**
@@ -899,13 +1056,23 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
       )
       assert.equal(show(layout, "lineHeader"), true, "标题在任何档都要显示")
     }
-    // 展开档多出来的四行
-    assert.equal(show("full", "lineSessionSuccess"), true)
+    // 展开档比紧凑档多出来的只有三条历史明细；会话块六行两档都在
     assert.equal(show("full", "lineTodayDetail"), true)
-    assert.equal(show("compact", "lineSessionSuccess"), false)
     assert.equal(show("compact", "lineTodayDetail"), false)
-    // 折叠档只剩标题与费用
-    assert.equal(show("collapsed", "lineSessionCost"), true)
+    assert.equal(show("full", "lineTotalDetail"), true)
+    assert.equal(show("compact", "lineTotalDetail"), false)
+    for (const name of [
+      "lineSessionReq",
+      "lineSessionHit",
+      "lineSessionInOut",
+      "lineSessionCache",
+      "lineSessionReasoning",
+      "lineSessionCost",
+    ]) {
+      assert.equal(show("full", name), true, `${name} 紧凑档必须显示`)
+      assert.equal(show("compact", name), true, `${name} 紧凑档必须显示`)
+      assert.equal(show("collapsed", name), name === "lineSessionCost", `${name} 折叠档`)
+    }
     assert.equal(show("collapsed", "lineDivider"), false)
     assert.equal(show("collapsed", "lineTotal"), false)
 
@@ -924,24 +1091,19 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
     assert.equal(isPanelLayout(null), false)
   })
 
-  test("展开档新增的两行只含各自那点字段", () => {
-    // 会话级成功率 = 标签 + 一个比率，不掺请求数也不掺命中率
-    const ok = lineSessionSuccess(s, "s1")
-    assert.equal(ok.length, 2)
-    assert.equal(ok[0]!.tone, "label")
-    assert.equal(width(ok[0]!.text), LABEL_W)
-    assert.equal(ok[1]!.tone, "value")
-    assert.match(ok[1]!.text, /^\d+(\.\d+)?%$/)
-
-    // 历史明细行：行首是 LABEL_W 个空格（缩进到数值列），
-    // 然后 成功率 · 请求数——纯数值/纯标签交替，金额一个都不在这行
+  test("历史明细行：缩进到数值列，只装请求数与成功率，不碰金额", () => {
+    // 行首是 LABEL_W 个空格（缩进到数值列），然后 请求数 · 成功率——
+    // 纯数值/纯标签交替，金额一个都不在这行
     for (const detail of [lineTodayDetail(s), lineMonthDetail(s), lineTotalDetail(s)]) {
       assert.deepEqual(
         detail.map((g) => g.tone),
         ["label", "value", "label", "label", "value", "label"],
       )
       assert.equal(detail[0]!.text, " ".repeat(LABEL_W))
-      assert.match(plain(detail).trim(), /^[\d.]+% 成功 · [\d,]+ 请求$/)
+      // 请求数补到明细列宽（累计量级，比会话块的 VALUE_W 宽）：
+      // 三条明细的 `· 成功` 才竖在同一列
+      assert.equal(width(detail[1]!.text), DETAIL_W)
+      assert.match(plain(detail).trim(), /^[\d,]+ +请求 · [\d.]+% +成功$/)
       assert.ok(!plain(detail).includes("¥"), "金额留在第一行，明细行不重复")
     }
   })
