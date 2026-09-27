@@ -3,7 +3,7 @@ import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import {
   fmtCount,
-  fmtInt,
+  fmtReq,
   fmtCost,
   fmtPct,
   NO_DATA,
@@ -11,7 +11,6 @@ import {
   LABEL_W,
   VALUE_W,
   MONEY_W,
-  DETAIL_W,
   FULL_ORDER,
   LAYOUT_LINES,
   PANEL_LAYOUTS,
@@ -86,41 +85,73 @@ function snap(over: Partial<Snapshot>): Snapshot {
 const EMPTY_CELL = " ".repeat(LABEL_W) + NO_DATA
 
 describe("fmtCount", () => {
-  test("小数走 K，999 以内原样", () => {
+  test("999 以内原样：不加小数、不加单位", () => {
     assert.equal(fmtCount(0), "0")
     assert.equal(fmtCount(999), "999")
-    assert.equal(fmtCount(1000), "1.0K")
-    assert.equal(fmtCount(-1234), "-1.2K")
-    assert.equal(fmtCount(123456), "123K")
+    assert.equal(fmtCount(1000), "1.00K")
+    assert.equal(fmtCount(-1234), "-1.23K")
+    assert.equal(fmtCount(123456), "123.46K")
   })
 
-  test("大数走 K/M/G", () => {
-    assert.equal(fmtCount(10000), "10.0K")
-    assert.equal(fmtCount(100000), "100K")
-    assert.equal(fmtCount(1234567), "1.2M")
-    assert.equal(fmtCount(2.5e9), "2.5G")
+  test("四档 K/M/B/T，十亿写成 B", () => {
+    assert.equal(fmtCount(10000), "10.00K")
+    assert.equal(fmtCount(100000), "100.00K")
+    assert.equal(fmtCount(1234567), "1.23M")
+    assert.equal(fmtCount(2.5e9), "2.50B")
+    assert.equal(fmtCount(2.5e12), "2.50T")
+    // 旧版四档只到 G，1e12 只能挤成 `1000G`
+    assert.ok(!fmtCount(2.5e12).includes("G"), "B 档不该再出现 G")
   })
 
-  test("进位跨档不出 1000.0K", () => {
-    assert.equal(fmtCount(999400), "999K")
-    assert.equal(fmtCount(999949), "1.0M")
-    assert.equal(fmtCount(999950), "1.0M")
-    assert.equal(fmtCount(999999), "1.0M")
+  test("固定两位，进位跨档不出 1000.00K", () => {
+    assert.equal(fmtCount(1234), "1.23K")
+    assert.equal(fmtCount(1236), "1.24K")
+    assert.equal(fmtCount(999400), "999.40K")
+    assert.equal(fmtCount(999999), "1.00M")
+    assert.equal(fmtCount(999999999), "1.00B")
+    assert.equal(fmtCount(1e12), "1.00T")
+    // 先取整再缩写：999.6 若按原值落进 999 以内会显示成 `1000`
+    assert.equal(fmtCount(999.6), "1.00K")
   })
 
-  test("非法值退占位", () => {
+  test("最长 999.99K 正好 7 格——VALUE_W 就是按它定的", () => {
+    assert.equal(fmtCount(999990), "999.99K")
+    assert.equal(width("999.99K"), 7)
+    for (const n of [0, 1, 999, 1000, 123456, 999990, 999999, 1234567, 987654321, 2.5e12]) {
+      assert.ok(width(fmtCount(n)) <= 7, `${n} → ${fmtCount(n)} 超 7 格`)
+    }
+    // 档位尽头的 T 升无可升，只能把溢出的那一位留下——现实中到不了的量级
+    assert.equal(fmtCount(999999999999999), "1000.00T")
     assert.equal(fmtCount(Number.NaN), NO_DATA)
     assert.equal(fmtCount(Number.POSITIVE_INFINITY), NO_DATA)
   })
 })
 
-describe("fmtInt", () => {
-  test("请求数千分位，不缩写", () => {
-    assert.equal(fmtInt(0), "0")
-    assert.equal(fmtInt(5), "5")
-    assert.equal(fmtInt(1234), "1,234")
-    assert.equal(fmtInt(1234.6), "1,235")
-    assert.equal(fmtInt(Number.NaN), NO_DATA)
+describe("fmtReq", () => {
+  test("与 token 同形：两位小数 + 单位", () => {
+    assert.equal(fmtReq(0), "0")
+    assert.equal(fmtReq(5), "5")
+    assert.equal(fmtReq(999), "999")
+    assert.equal(fmtReq(1000), "1.00K")
+    assert.equal(fmtReq(1160), "1.16K")
+    assert.equal(fmtReq(40000), "40.00K")
+    assert.equal(fmtReq(116000), "116.00K")
+    assert.equal(fmtReq(-1500), "-1.50K")
+  })
+
+  test("档位只有 K/M，同样 7 格封顶", () => {
+    assert.equal(fmtReq(999990), "999.99K")
+    assert.equal(fmtReq(654321), "654.32K")
+    // 999,999 四舍五入跨过千位 → 升 M 档，与 token 同一条进位规则
+    assert.equal(fmtReq(999999), "1.00M")
+    assert.equal(fmtReq(1000000), "1.00M")
+    // 请求理论不会超过 1,000,000；真撞上更大的就停在 M 档不升 B
+    assert.equal(fmtReq(1e9), "1000.00M")
+    for (const n of [0, 1, 999, 1000, 123456, 999990, 999999, 1000000]) {
+      assert.ok(width(fmtReq(n)) <= 7, `${n} → ${fmtReq(n)} 超 7 格`)
+    }
+    assert.equal(fmtReq(Number.NaN), NO_DATA)
+    assert.equal(fmtReq(Number.POSITIVE_INFINITY), NO_DATA)
   })
 })
 
@@ -252,16 +283,16 @@ describe("面板行", () => {
     // 快照未到（updated=0）时不显示状态，避免闪一句"仅内存"
     assert.equal(plain(lineHeader(emptySnapshot("¥"), "x")), "ocache")
     const solo = snap({ updated: 1, record: true, sessions: { x: sess({ session_id: "x" }) } })
-    assert.equal(plain(lineHeader(solo, "x")), "ocache · ● 记录中")
+    assert.equal(plain(lineHeader(solo, "x")), "ocache  ● 记录中")
     // s 是首帧之前的快照（updated=0），补上更新时间才会有状态尾巴
     assert.equal(
       plain(lineHeader({ ...s, updated: 1 }, "s1")),
-      "ocache +1 子会话 · ○ 仅内存",
+      "ocache +1 子会话  ○ 仅内存",
     )
     // 会话还没数据时同样只报聚合范围，具体行各自退 "—"
     assert.equal(
       plain(lineHeader(snap({ updated: 1, record: true }), "未见过")),
-      "ocache · ● 记录中",
+      "ocache  ● 记录中",
     )
   })
 
@@ -280,22 +311,22 @@ describe("面板行", () => {
     }
   })
 
-  test("行文案：请求·成功 / 命中 / 输入·输出 / 缓读·缓写 / 推理 / 费用", () => {
+  test("行文案：请求+成功 / 命中 / 输入+输出 / 缓读+缓写 / 推理 / 费用", () => {
     // 每行第一段数值都补到 VALUE_W（这里用 padEnd 展开，好看出补了几个空格），
-    // 后面的 `·` 与第二个标签才能落在固定列上
+    // 后面的空 2 格与第二个标签才能落在固定列上
     assert.equal(
       plain(lineSessionReq(s, "s1")),
-      `请求${" ".repeat(1)}${"5".padEnd(VALUE_W)} · 成功 80%`,
+      `请求${" ".repeat(1)}${"5".padEnd(VALUE_W)}  成功 80%`,
     )
     // 会话没有 recent：命中行退成只有累计段，不整行占位
     assert.equal(plain(lineSessionHit(s, "s1")), `命中${" ".repeat(1)}96.39%`)
     assert.equal(
       plain(lineSessionInOut(s, "s1")),
-      `输入${" ".repeat(1)}${"1.2K".padEnd(VALUE_W)} · 输出 1.5K`,
+      `输入${" ".repeat(1)}${"1.23K".padEnd(VALUE_W)}  输出 1.46K`,
     )
     assert.equal(
       plain(lineSessionCache(s, "s1")),
-      `缓读${" ".repeat(1)}${"56.8K".padEnd(VALUE_W)} · 缓写 890`,
+      `缓读${" ".repeat(1)}${"56.79K".padEnd(VALUE_W)}  缓写 890`,
     )
     assert.equal(plain(lineSessionReasoning(s, "s1")), `推理${" ".repeat(1)}900`)
     // 推理不在费用行里了：金额是这行唯一的内容
@@ -340,19 +371,19 @@ describe("面板行", () => {
         },
       },
     })
-    // 紧凑档金额补到 MONEY_W：三行金额长短不一，不补的话 `· 成功` 各起各的列；
+    // 紧凑档金额补到 MONEY_W：三行金额长短不一，不补的话 `成功` 各起各的列；
     // `成功` 提到百分比前面（与展开档同规则），百分比落到行尾、不再补宽
     assert.equal(
       plain(lineToday(withAgg)),
-      `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)} · 成功 100%`,
+      `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)}  成功 100%`,
     )
     assert.equal(
       plain(lineMonth(withAgg)),
-      `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)} · 成功 99.1%`,
+      `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)}  成功 99.1%`,
     )
     assert.equal(
       plain(lineTotal(withAgg)),
-      `累计${" ".repeat(1)}${"¥5.67".padEnd(MONEY_W)} · 成功 99.7%`,
+      `累计${" ".repeat(1)}${"¥5.67".padEnd(MONEY_W)}  成功 99.7%`,
     )
 
     const empty = snap({ agg: null })
@@ -376,8 +407,10 @@ describe("本次命中率与环比", () => {
     sess({ input: 1, cache_read: 3, cache_write: 0, ...over })
   /** 该行拼成的整串：文案与分段分开断言，这里只看"写了什么"。 */
   const row = (s: Snapshot, sid: string) => plain(lineSessionHit(s, sid))
-  /** 命中行的固定前缀：累计值补到 VALUE_W，`· 本次` 因此落在固定列。 */
-  const HEAD = `命中${" ".repeat(1)}${"75%".padEnd(VALUE_W)} · 本次 `
+  /** 命中行的固定前缀：累计值补到 VALUE_W，空 2 格 + `本次` 因此落在固定列。 */
+  const HEAD = `命中${" ".repeat(1)}${"75%".padEnd(VALUE_W)}  本次 `
+  /** 有环比时"本次"值补到 VALUE_W（把 ± 顶到固定列），环比接在它后面。 */
+  const CUR = (v: string, d: string) => `${v.padEnd(VALUE_W)} ${d}`
 
   test("首次请求没有基线：只显示命中率，不带符号", () => {
     const s = snap({ sessions: { s1: hit({ session_id: "s1", recent: [at(200, HI)] }) } })
@@ -388,12 +421,12 @@ describe("本次命中率与环比", () => {
     const up = snap({
       sessions: { s1: hit({ session_id: "s1", recent: [at(200, HI), at(100, LO)] }) },
     })
-    assert.equal(row(up, "s1"), HEAD + `97.50% +1.90%`)
+    assert.equal(row(up, "s1"), HEAD + CUR("97.50%", "+1.90%"))
 
     const down = snap({
       sessions: { s1: hit({ session_id: "s1", recent: [at(200, LO), at(100, HI)] }) },
     })
-    assert.equal(row(down, "s1"), HEAD + `95.60% -1.90%`)
+    assert.equal(row(down, "s1"), HEAD + CUR("95.60%", "-1.90%"))
 
     // 符号之外还得有颜色：光靠 +/- 在弱光下扫不出来
     assert.equal(lineSessionHit(up, "s1").at(-1)?.tone, "up")
@@ -426,7 +459,7 @@ describe("本次命中率与环比", () => {
     const s = snap({
       sessions: { s1: hit({ session_id: "s1", recent: [at(200, B), at(100, A)] }) },
     })
-    assert.equal(row(s, "s1"), HEAD + `98.75% +0.25%`)
+    assert.equal(row(s, "s1"), HEAD + CUR("98.75%", "+0.25%"))
   })
 
   test("整百分比不带小数尾巴，避免 97.00% 这种噪音", () => {
@@ -444,7 +477,7 @@ describe("本次命中率与环比", () => {
     })
     // 正确取法：300 的 HI 与 200 的 LO → +1.90%
     // 若退化成"只看 root 自己两条"，会得到两条 HI → 无符号
-    assert.equal(row(s, "root"), HEAD + `97.50% +1.90%`)
+    assert.equal(row(s, "root"), HEAD + CUR("97.50%", "+1.90%"))
     // 子会话自己的子树只有一条，没有基线 → 不带符号
     assert.equal(row(s, "child"), HEAD + `95.60%`)
   })
@@ -473,9 +506,10 @@ describe("本次命中率与环比", () => {
   /**
    * 命中行是面板上最长的一行（文件头的 35 格硬约束就卡在它身上）。
    * 最坏组合：累计、本次、环比三段全是两位小数且都顶到 99.99%。
-   * 算得 `5 + 6 + 8 + 6 + 8 = 33`——离 35 的硬上限还剩 2 格。
+   * 算得 `5 + 7 + 7 + 7 + 8 = 34`——离 35 的硬上限还剩 1 格。
+   * （数值列从 6 涨到 7、分隔从 ` · ` 3 格收成 2 格，净值 +1。）
    */
-  test("最坏情况（99.99% / 99.99% / +99.99%）正好 33 格", () => {
+  test("最坏情况（99.99% / 99.99% / +99.99%）正好 34 格", () => {
     const fat = snap({
       sessions: {
         s1: hit({
@@ -490,8 +524,11 @@ describe("本次命中率与环比", () => {
       },
     })
     const text = plain(lineSessionHit(fat, "s1"))
-    assert.equal(text, `命中${" ".repeat(1)}99.99% · 本次 99.99% +99.99%`)
-    assert.equal(width(text), 33)
+    assert.equal(
+      text,
+      `命中${" ".repeat(1)}${"99.99%".padEnd(VALUE_W)}  本次 ${"99.99%".padEnd(VALUE_W)} +99.99%`,
+    )
+    assert.equal(width(text), 34)
   })
 })
 
@@ -604,7 +641,7 @@ describe("整块面板端到端断言（M5/A2）", () => {
     assert.deepEqual(got, ["lineHeader", "lineSessionCost"])
     assert.deepEqual(
       renderPanel(s, "root", "collapsed").map((l) => l.text),
-      ["ocache +1 子会话 · ● 记录中", `费用${" ".repeat(1)}¥1.30`],
+      ["ocache +1 子会话  ● 记录中", `费用${" ".repeat(1)}¥1.30`],
     )
   })
 
@@ -613,45 +650,45 @@ describe("整块面板端到端断言（M5/A2）", () => {
       renderPanel(s, "root", "compact").map((l) => l.text),
       [
         DIVIDER,
-        "ocache +1 子会话 · ● 记录中",
-        `请求${" ".repeat(1)}${"105".padEnd(VALUE_W)} · 成功 99%`,
-        `命中${" ".repeat(1)}98.93% · 本次 97.50% +1.90%`,
-        `输入${" ".repeat(1)}${"1.6K".padEnd(VALUE_W)} · 输出 5.3K`,
-        `缓读${" ".repeat(1)}${"148K".padEnd(VALUE_W)} · 缓写 0`,
-        `推理${" ".repeat(1)}3.2K`,
+        "ocache +1 子会话  ● 记录中",
+        `请求${" ".repeat(1)}${"105".padEnd(VALUE_W)}  成功 99%`,
+        `命中${" ".repeat(1)}${"98.93%".padEnd(VALUE_W)}  本次 ${"97.50%".padEnd(VALUE_W)} +1.90%`,
+        `输入${" ".repeat(1)}${"1.60K".padEnd(VALUE_W)}  输出 5.30K`,
+        `缓读${" ".repeat(1)}${"148.40K".padEnd(VALUE_W)}  缓写 0`,
+        `推理${" ".repeat(1)}3.20K`,
         `费用${" ".repeat(1)}¥1.30`,
         DIVIDER,
         // 紧凑档的钱后面跟着成功率，三行金额补到 MONEY_W 才不各起各的列
-        `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)} · 成功 100%`,
-        `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)} · 成功 99.1%`,
-        `累计${" ".repeat(1)}${"¥1,234.50".padEnd(MONEY_W)} · 成功 99.6%`,
+        `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)}  成功 100%`,
+        `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)}  成功 99.1%`,
+        `累计${" ".repeat(1)}${"¥1,234.50".padEnd(MONEY_W)}  成功 99.6%`,
         DIVIDER,
       ],
     )
   })
 
-  test("展开档十六行逐行断言：上下边框 + 请求·成功 + 三条历史明细", () => {
+  test("展开档十六行逐行断言：上下边框 + 请求+成功 + 三条历史明细", () => {
     assert.deepEqual(
       renderPanel(s, "root", "full").map((l) => l.text),
       [
         DIVIDER,
-        "ocache +1 子会话 · ● 记录中",
+        "ocache +1 子会话  ● 记录中",
         // 104/105 = 99.05% → 一位小数 99.0 → 整百分比去尾巴 = 99%
-        `请求${" ".repeat(1)}${"105".padEnd(VALUE_W)} · 成功 99%`,
-        `命中${" ".repeat(1)}98.93% · 本次 97.50% +1.90%`,
-        `输入${" ".repeat(1)}${"1.6K".padEnd(VALUE_W)} · 输出 5.3K`,
-        `缓读${" ".repeat(1)}${"148K".padEnd(VALUE_W)} · 缓写 0`,
-        `推理${" ".repeat(1)}3.2K`,
+        `请求${" ".repeat(1)}${"105".padEnd(VALUE_W)}  成功 99%`,
+        `命中${" ".repeat(1)}${"98.93%".padEnd(VALUE_W)}  本次 ${"97.50%".padEnd(VALUE_W)} +1.90%`,
+        `输入${" ".repeat(1)}${"1.60K".padEnd(VALUE_W)}  输出 5.30K`,
+        `缓读${" ".repeat(1)}${"148.40K".padEnd(VALUE_W)}  缓写 0`,
+        `推理${" ".repeat(1)}3.20K`,
         `费用${" ".repeat(1)}¥1.30`,
         DIVIDER,
         // 展开档的历史行：第一行只留金额（四笔金额因此竖在同一列），
         // 第二行标签在前、请求数与成功率接在后面，`请求` 与 `今日` 同起点
         `今日${" ".repeat(1)}¥0.045`,
-        `请求${" ".repeat(1)}${"12".padEnd(DETAIL_W)} · 成功 100%`,
+        `请求${" ".repeat(1)}${"12".padEnd(VALUE_W)}  成功 100%`,
         `本月${" ".repeat(1)}¥1.23`,
-        `请求${" ".repeat(1)}${"340".padEnd(DETAIL_W)} · 成功 99.1%`,
+        `请求${" ".repeat(1)}${"340".padEnd(VALUE_W)}  成功 99.1%`,
         `累计${" ".repeat(1)}¥1,234.50`,
-        `请求${" ".repeat(1)}${"12,345".padEnd(DETAIL_W)} · 成功 99.6%`,
+        `请求${" ".repeat(1)}${"12.35K".padEnd(VALUE_W)}  成功 99.6%`,
         DIVIDER,
       ],
     )
@@ -663,8 +700,8 @@ describe("整块面板端到端断言（M5/A2）", () => {
     const header = (x: ReturnType<typeof renderPanel>) => x[1]!.text
     assert.equal(header(renderPanel(snap({ sessions }), "root")), "ocache +1 子会话")
     const off = snap({ updated: 1, record: false, sessions, agg })
-    assert.equal(header(renderPanel(off, "root")), "ocache +1 子会话 · ○ 仅内存")
-    assert.equal(header(renderPanel(s, "root")), "ocache +1 子会话 · ● 记录中")
+    assert.equal(header(renderPanel(off, "root")), "ocache +1 子会话  ○ 仅内存")
+    assert.equal(header(renderPanel(s, "root")), "ocache +1 子会话  ● 记录中")
   })
 
   test("会话毫无数据：标题行照常，会话块整片占位，历史三口径不受影响", () => {
@@ -674,7 +711,7 @@ describe("整块面板端到端断言（M5/A2）", () => {
       renderPanel(empty, "没见过的会话", "compact").map((l) => l.text),
       [
         DIVIDER,
-        "ocache · ● 记录中",
+        "ocache  ● 记录中",
         EMPTY_CELL,
         EMPTY_CELL,
         EMPTY_CELL,
@@ -682,9 +719,9 @@ describe("整块面板端到端断言（M5/A2）", () => {
         EMPTY_CELL,
         EMPTY_CELL,
         DIVIDER,
-        `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)} · 成功 100%`,
-        `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)} · 成功 99.1%`,
-        `累计${" ".repeat(1)}${"¥1,234.50".padEnd(MONEY_W)} · 成功 99.6%`,
+        `今日${" ".repeat(1)}${"¥0.045".padEnd(MONEY_W)}  成功 100%`,
+        `本月${" ".repeat(1)}${"¥1.23".padEnd(MONEY_W)}  成功 99.1%`,
+        `累计${" ".repeat(1)}${"¥1,234.50".padEnd(MONEY_W)}  成功 99.6%`,
         DIVIDER,
       ],
     )
@@ -693,7 +730,7 @@ describe("整块面板端到端断言（M5/A2）", () => {
       renderPanel(empty, "没见过的会话", "full").map((l) => l.text),
       [
         DIVIDER,
-        "ocache · ● 记录中",
+        "ocache  ● 记录中",
         EMPTY_CELL,
         EMPTY_CELL,
         EMPTY_CELL,
@@ -702,11 +739,11 @@ describe("整块面板端到端断言（M5/A2）", () => {
         EMPTY_CELL,
         DIVIDER,
         `今日${" ".repeat(1)}¥0.045`,
-        `请求${" ".repeat(1)}${"12".padEnd(DETAIL_W)} · 成功 100%`,
+        `请求${" ".repeat(1)}${"12".padEnd(VALUE_W)}  成功 100%`,
         `本月${" ".repeat(1)}¥1.23`,
-        `请求${" ".repeat(1)}${"340".padEnd(DETAIL_W)} · 成功 99.1%`,
+        `请求${" ".repeat(1)}${"340".padEnd(VALUE_W)}  成功 99.1%`,
         `累计${" ".repeat(1)}¥1,234.50`,
-        `请求${" ".repeat(1)}${"12,345".padEnd(DETAIL_W)} · 成功 99.6%`,
+        `请求${" ".repeat(1)}${"12.35K".padEnd(VALUE_W)}  成功 99.6%`,
         DIVIDER,
       ],
     )
@@ -877,11 +914,12 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
 
   /**
    * 2026-09-27 改版的核心：一行两段的行不能靠手插空格排。
-   * 第一个数值补到 `VALUE_W`，`·` 与第二个标签因此钉死在固定的格上——
-   * 数值从 `4` 到 `987.7M` 长短不一，这三个位置一格都不许动。
+   * 第一个数值补到 `VALUE_W`，空 2 格与第二个标签因此钉死在固定的格上——
+   * 数值从 `4` 到 `987.65B` 长短不一，这两个位置一格都不许动。
+   * 2026-09-28 起 `·` 被拿掉，"分隔落在哪一格"就改由第二个标签间接钉住。
    */
-  test("会话块四行两段：`·`、第二个标签、第二个数值三处全在同列", () => {
-    // 数值故意拉得长短不一：请求 4、命中 100%、输入 1.2K、缓读 987.7M
+  test("会话块四行两段：第二个标签、第二个数值两处全在同列", () => {
+    // 数值故意拉得长短不一：请求 4、命中 100%、输入 1.23K、缓读 987.65B
     const varied = snap({
       updated: 1,
       record: true,
@@ -908,41 +946,49 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
     ]
     for (const [segs, second] of rows) {
       const text = plain(segs)
-      assert.equal(atCol(text, "·"), LABEL_W + VALUE_W + 1, text)
-      assert.equal(atCol(text, second), LABEL_W + VALUE_W + 3, text)
+      assert.equal(text.includes("·"), false, `面板已无分隔点：${text}`)
+      // 第二个标签 = 标签列(5) + 数值列(7) + 空 2 格 之后那一格（0 起第 14 格）
+      assert.equal(atCol(text, second), LABEL_W + VALUE_W + 2, text)
     }
-    // 第四个位置——第二个数值。四行的第二标签一律 2 字（4 格），四个数值因此
+    // 第三个位置——第二个数值。四行的第二标签一律 2 字（4 格），四个数值因此
     // 必须落在同一格。这正是缓存那行从 `缓存读`/`缓存写` 改成 `缓读`/`缓写`
-    // 的全部动机：三字标签占 6 格，会把该行数值顶到第 24 格、比别的行右移
-    // 2 格，而把别处垫到 6 格会让最长的命中行涨到 37 格、超 35 的硬上限。
+    // 的全部动机：三字标签占 6 格，会把该行数值顶到 0 起第 21 格、比别的行右移
+    // 2 格，而把别处垫到 6 格会让最长的命中行涨到 36 格、超 35 的硬上限。
     // 谁把任一标签改长，这条断言会立刻歪掉，逼着重算宽度预算。
     for (const [segs, second] of rows) {
       const text = plain(segs)
       const value = text.slice(text.indexOf(second) + second.length + 1)
-      assert.equal(atCol(text, value), LABEL_W + VALUE_W + 8, text)
+      assert.equal(atCol(text, value), LABEL_W + VALUE_W + 7, text)
     }
   })
 
   test("紧凑档三行历史：金额补到位，`成功` 竖在一列", () => {
     for (const segs of [lineToday(s), lineMonth(s), lineTotal(s)]) {
       const text = plain(segs)
-      assert.equal(atCol(text, "·"), LABEL_W + MONEY_W + 1, text)
-      assert.equal(atCol(text, "成功"), LABEL_W + MONEY_W + 3, text)
+      assert.equal(text.includes("·"), false, `面板已无分隔点：${text}`)
+      // 金额列比数值列宽 4 格，这里的 `成功` 因此比会话块的右移 4 格
+      assert.equal(atCol(text, "成功"), LABEL_W + MONEY_W + 2, text)
     }
   })
 
-  test("三条历史明细：标签与数值各归其位，`· 成功` 竖在一列", () => {
-    // 明细行 = head("请求")(LABEL_W) + 请求数(DETAIL_W) + " · 成功 " + 成功率
+  test("三条历史明细：标签与数值各归其位，`成功` 与会话块同列", () => {
+    // 明细行 = head("请求")(LABEL_W) + 请求数(VALUE_W) + 空 2 格 + "成功 " + 成功率
     for (const segs of [lineTodayDetail(s), lineMonthDetail(s), lineTotalDetail(s)]) {
       const text = plain(segs)
       // `请求` 占满标签列，数值从 LABEL_W 起跳——与上一行的金额同一起点
       assert.equal(firstValueCol(segs), LABEL_W, text)
-      assert.equal(atCol(text, "·"), LABEL_W + DETAIL_W + 1, text)
-      assert.equal(atCol(text, "成功"), LABEL_W + DETAIL_W + 3, text)
+      // 请求数与 token 同宽（7 格封顶），`成功` 于是落在会话块同一格上
+      assert.equal(width(segs[1]!.text), VALUE_W, text)
+      assert.equal(atCol(text, "成功"), LABEL_W + VALUE_W + 2, text)
       // `成功` 标签与百分比前后相接，中间只隔一格空隙
-      assert.equal(segs[2]!.text, " · 成功 ", text)
+      assert.equal(segs[2]!.text, "  成功 ", text)
       assert.match(segs[3]!.text, /^[\d.]+%$/, text)
     }
+    // 上下统一：会话块第 1 行与历史明细行的 `成功` 必须同列
+    assert.equal(
+      atCol(plain(lineTodayDetail(s)), "成功"),
+      atCol(plain(lineSessionReq(s, "s1")), "成功"),
+    )
   })
 
   test("四笔金额（费用/今日/本月/累计）竖在同一列", () => {
@@ -1093,7 +1139,7 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
   })
 
   test("历史明细行：标签在前，只装请求数与成功率，不碰金额", () => {
-    // `请求` 打头（补满 LABEL_W，与上一行的 `今日` 同起点），后接 请求数 · 成功 P%——
+    // `请求` 打头（补满 LABEL_W，与上一行的 `今日` 同起点），后接 请求数 + 成功 P%——
     // 两组「标签+数值」交替，金额一个都不在这行
     for (const detail of [lineTodayDetail(s), lineMonthDetail(s), lineTotalDetail(s)]) {
       assert.deepEqual(
@@ -1102,11 +1148,12 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
       )
       assert.equal(detail[0]!.text.trim(), "请求")
       assert.equal(width(detail[0]!.text), LABEL_W)
-      // 请求数补到明细列宽（累计量级，比会话块的 VALUE_W 宽）：
-      // 三条明细的 `· 成功` 才竖在同一列
-      assert.equal(width(detail[1]!.text), DETAIL_W)
+      // 请求数与 token 同形同宽：两位小数 + K/M、7 格封顶，
+      // 于是会话块与历史明细共用 VALUE_W，`成功` 落在同一格
+      assert.equal(width(detail[1]!.text), VALUE_W)
       // 行尾的百分比不补宽（后面没人跟着了），所以 100% 与 99.1% 不等长
-      assert.match(plain(detail), /^请求 [\d,]+ +· 成功 [\d.]+%$/)
+      assert.match(plain(detail), /^请求 [\d.]+[KMBT]? +成功 [\d.]+%$/)
+      assert.equal(plain(detail).includes("·"), false, "面板已无分隔点")
       assert.ok(!plain(detail).includes("¥"), "金额留在第一行，明细行不重复")
     }
   })
