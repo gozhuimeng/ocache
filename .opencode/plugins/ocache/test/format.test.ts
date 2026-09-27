@@ -9,21 +9,32 @@ import {
   NO_DATA,
   DIVIDER,
   LABEL_W,
+  FULL_ORDER,
+  LAYOUT_LINES,
+  PANEL_LAYOUTS,
+  NEXT_LAYOUT,
+  isPanelLayout,
+  show,
   lineHeader,
   lineSessionHit,
+  lineSessionSuccess,
   lineSessionRecent,
   lineSessionMissRead,
   lineSessionWriteOut,
   lineSessionCost,
   lineToday,
+  lineTodayDetail,
   lineMonth,
+  lineMonthDetail,
   lineTotal,
+  lineTotalDetail,
   plain,
   lineDivider,
   renderPanel,
   width,
   type Seg,
   type Tone,
+  type PanelLayout,
 } from "../shared/format.ts"
 import {
   emptySnapshot,
@@ -501,15 +512,46 @@ describe("整块面板端到端断言（M5/A2）", () => {
   }
   const s = snap({ updated: 1, record: true, sessions, agg })
 
-  test("面板恒为 10 行", () => {
-    assert.equal(renderPanel(s, "root").length, 10)
-    assert.equal(renderPanel(snap({}), "x").length, 10)
+  test("三档布局行数：展开 16 / 紧凑 12 / 折叠 2", () => {
+    // 展开 = 16（14 行内容 + 上下两条边框线）；紧凑同理 12；
+    // 折叠只留 2 行内容、不画边框（见 lineRuleTop 的说明）
+    assert.equal(renderPanel(s, "root", "full").length, 16)
+    assert.equal(renderPanel(s, "root", "compact").length, 12)
+    assert.equal(renderPanel(s, "root", "collapsed").length, 2)
+    // 没有任何数据也必须是同样的行数——占位行不能把面板撑塌或撑高
+    assert.equal(renderPanel(snap({}), "x", "full").length, 16)
+    assert.equal(renderPanel(snap({}), "x", "compact").length, 12)
+    assert.equal(renderPanel(snap({}), "x", "collapsed").length, 2)
   })
 
-  test("十行全串逐行断言：子会话聚合 + 两位小数命中率 + 三口径", () => {
+  test("上沿与下沿成对画线，折叠档一律不画", () => {
+    for (const layout of ["full", "compact"] as const) {
+      const lines = renderPanel(s, "root", layout)
+      assert.equal(lines[0]!.name, "lineRuleTop", `${layout} 档缺上沿线`)
+      assert.equal(lines.at(-1)!.name, "lineRuleBottom", `${layout} 档缺下沿线`)
+      assert.equal(lines[0]!.text, DIVIDER)
+      assert.equal(lines.at(-1)!.text, DIVIDER)
+    }
+    const collapsed = renderPanel(s, "root", "collapsed").map((l) => l.name)
+    assert.equal(collapsed.includes("lineRuleTop"), false, "折叠档不该画上沿")
+    assert.equal(collapsed.includes("lineRuleBottom"), false, "折叠档不该画下沿")
+    assert.equal(collapsed.includes("lineDivider"), false, "折叠档也没有中缝")
+  })
+
+  test("折叠档只剩标题与费用，且顺序是标题 → 费用", () => {
+    const got = renderPanel(s, "root", "collapsed").map((l) => l.name)
+    assert.deepEqual(got, ["lineHeader", "lineSessionCost"])
     assert.deepEqual(
-      renderPanel(s, "root").map((l) => l.text),
+      renderPanel(s, "root", "collapsed").map((l) => l.text),
+      ["ocache +1 子会话 · ● 记录中", `费用${" ".repeat(3)}¥1.30 · 推理 3.2K`],
+    )
+  })
+
+  test("紧凑档十二行逐行断言：上下有边框 + 子会话聚合 + 两位小数命中率 + 三口径", () => {
+    assert.deepEqual(
+      renderPanel(s, "root", "compact").map((l) => l.text),
       [
+        DIVIDER,
         "ocache +1 子会话 · ● 记录中",
         `请求${" ".repeat(3)}105 · 命中 98.93%`,
         `本次${" ".repeat(3)}97.50% +1.90%`,
@@ -520,23 +562,54 @@ describe("整块面板端到端断言（M5/A2）", () => {
         `今日${" ".repeat(3)}¥0.045 · 100% 成功`,
         `本月${" ".repeat(3)}¥1.23 · 99.1% 成功`,
         `累计${" ".repeat(3)}¥1,234.50 · 99.6% 成功`,
+        DIVIDER,
+      ],
+    )
+  })
+
+  test("展开档十六行逐行断言：上下边框 + 会话级成功率 + 三条历史明细", () => {
+    assert.deepEqual(
+      renderPanel(s, "root", "full").map((l) => l.text),
+      [
+        DIVIDER,
+        "ocache +1 子会话 · ● 记录中",
+        `请求${" ".repeat(3)}105 · 命中 98.93%`,
+        // 104/105 = 99.05% → 一位小数 99.0 → 整百分比去尾巴 = 99%
+        `成功${" ".repeat(3)}99%`,
+        `本次${" ".repeat(3)}97.50% +1.90%`,
+        `未命中${" ".repeat(1)}1.6K · 缓存读 148K`,
+        `缓存写${" ".repeat(1)}0 · 输出 5.3K`,
+        `费用${" ".repeat(3)}¥1.30 · 推理 3.2K`,
+        DIVIDER,
+        // 展开档的历史行：第一行只留金额（四笔金额因此竖在同一列），
+        // 成功率与请求数缩进到标签列之后作第二行
+        `今日${" ".repeat(3)}¥0.045`,
+        `${" ".repeat(7)}100% 成功 · 12 请求`,
+        `本月${" ".repeat(3)}¥1.23`,
+        `${" ".repeat(7)}99.1% 成功 · 340 请求`,
+        `累计${" ".repeat(3)}¥1,234.50`,
+        `${" ".repeat(7)}99.6% 成功 · 12,345 请求`,
+        DIVIDER,
       ],
     )
   })
 
   test("记录状态三态：首帧不显示 / 仅内存 / 记录中", () => {
     // updated=0（首帧快照还没到）→ 不带状态尾巴，避免闪一句"仅内存"误导
-    assert.equal(renderPanel(snap({ sessions }), "root")[0]!.text, "ocache +1 子会话")
+    // 行 0 是上沿分隔线，标题在行 1
+    const header = (x: ReturnType<typeof renderPanel>) => x[1]!.text
+    assert.equal(header(renderPanel(snap({ sessions }), "root")), "ocache +1 子会话")
     const off = snap({ updated: 1, record: false, sessions, agg })
-    assert.equal(renderPanel(off, "root")[0]!.text, "ocache +1 子会话 · ○ 仅内存")
-    assert.equal(renderPanel(s, "root")[0]!.text, "ocache +1 子会话 · ● 记录中")
+    assert.equal(header(renderPanel(off, "root")), "ocache +1 子会话 · ○ 仅内存")
+    assert.equal(header(renderPanel(s, "root")), "ocache +1 子会话 · ● 记录中")
   })
 
-  test("会话毫无数据：标题行照常，第 2~6 行整片占位，历史三口径不受影响", () => {
+  test("会话毫无数据：标题行照常，会话块整片占位，历史三口径不受影响", () => {
     const empty = snap({ updated: 1, record: true, agg })
     assert.deepEqual(
-      renderPanel(empty, "没见过的会话").map((l) => l.text),
+      renderPanel(empty, "没见过的会话", "compact").map((l) => l.text),
       [
+        DIVIDER,
         "ocache · ● 记录中",
         EMPTY_CELL,
         EMPTY_CELL,
@@ -547,27 +620,66 @@ describe("整块面板端到端断言（M5/A2）", () => {
         `今日${" ".repeat(3)}¥0.045 · 100% 成功`,
         `本月${" ".repeat(3)}¥1.23 · 99.1% 成功`,
         `累计${" ".repeat(3)}¥1,234.50 · 99.6% 成功`,
+        DIVIDER,
+      ],
+    )
+    // 展开档的占位比紧凑档多一行（会话级成功率），明细行则照常有值
+    assert.deepEqual(
+      renderPanel(empty, "没见过的会话", "full").map((l) => l.text),
+      [
+        DIVIDER,
+        "ocache · ● 记录中",
+        EMPTY_CELL,
+        EMPTY_CELL,
+        EMPTY_CELL,
+        EMPTY_CELL,
+        EMPTY_CELL,
+        EMPTY_CELL,
+        DIVIDER,
+        `今日${" ".repeat(3)}¥0.045`,
+        `${" ".repeat(7)}100% 成功 · 12 请求`,
+        `本月${" ".repeat(3)}¥1.23`,
+        `${" ".repeat(7)}99.1% 成功 · 340 请求`,
+        `累计${" ".repeat(3)}¥1,234.50`,
+        `${" ".repeat(7)}99.6% 成功 · 12,345 请求`,
+        DIVIDER,
       ],
     )
   })
 
-  test("历史口径整体缺失时也还是 10 行，不会塌成 7 行", () => {
+  test("历史口径整体缺失时行数不变，明细行跟着变占位而不是塌掉", () => {
     const noAgg = snap({ updated: 1, record: true, sessions })
-    const got = renderPanel(noAgg, "root").map((l) => l.text)
-    assert.equal(got.length, 10)
-    assert.equal(got[7], EMPTY_CELL)
-    assert.equal(got[8], EMPTY_CELL)
-    assert.equal(got[9], EMPTY_CELL)
+    const full = renderPanel(noAgg, "root", "full").map((l) => l.text)
+    assert.equal(full.length, 16)
+    // 行 0 上沿 / 行 1 标题 / 行 8 中缝 / 行 15 下沿
+    assert.equal(full[0], DIVIDER)
+    assert.equal(full[8], DIVIDER)
+    assert.equal(full[15], DIVIDER)
+    for (const i of [9, 10, 11, 12, 13, 14]) assert.equal(full[i], EMPTY_CELL)
+    const compact = renderPanel(noAgg, "root", "compact").map((l) => l.text)
+    assert.equal(compact.length, 12)
+    assert.equal(compact[0], DIVIDER)
+    assert.equal(compact[7], DIVIDER)
+    for (const i of [8, 9, 10]) assert.equal(compact[i], EMPTY_CELL)
+    // 折叠档只看标题与费用，历史缺不缺都与它无关
+    assert.equal(renderPanel(noAgg, "root", "collapsed").length, 2)
   })
 
   /**
-   * tui.tsx 用**十条固定 `<text>`** 而不是 `.map(renderPanel)`——
+   * tui.tsx 用**写死的 `<text>`** 而不是 `.map(renderPanel)`——
    * `.map` 每秒重建整棵子树、终端里会闪（REQUIREMENTS §4 实现约束）。
    * 代价是渲染顺序与 `renderPanel` 分居两处，会被人改乱。
    * 这条测试反查 tui.tsx 源码，钉死两者一致。
    *
    * M6 之后每行是 `<text fg={...}>{paint(lineXxx(...))}</text>`：
    * 正则要跳过 `fg=` 属性、再从 `paint(` 里取出**行函数名**。
+   *
+   * 多档布局之后还要多验两件事：
+   * 1. tui.tsx 的行序 == `FULL_ORDER`，且每一档渲染出的行名序列
+   *    == 从 `FULL_ORDER` 里按该档过滤的结果（顺序定义只允许有一处）；
+   * 2. 每个 `<text>` 外面都套着 `show(layout(), 同名)` 守卫——
+   *    空 `<text>` 实测会占一整行，少一个守卫，折叠档就会变成
+   *    "两行内容 + 十二行空白"。
    */
   test("renderPanel 的行序与 tui.tsx 里固定 <text> 的顺序一致", async () => {
     const src = await readFile(new URL("../tui.tsx", import.meta.url), "utf8")
@@ -575,7 +687,25 @@ describe("整块面板端到端断言（M5/A2）", () => {
       (m) => m[1]!,
     )
     assert.ok(inTui.length > 0, "没能从 tui.tsx 解析出 <text> 行——渲染结构被改过？")
-    assert.deepEqual(renderPanel(s, "root").map((l) => l.name), inTui)
+    assert.deepEqual(inTui, [...FULL_ORDER])
+
+    for (const layout of PANEL_LAYOUTS) {
+      const want: string[] = inTui.filter((name) => show(layout, name))
+      assert.deepEqual(
+        renderPanel(s, "root", layout).map((l) => l.name),
+        want,
+        `${layout} 档的行序与 tui.tsx 不一致`,
+      )
+    }
+
+    // 每个 <text> 前面紧挨着的 show() 必须守卫同名的行
+    const guarded = [...src.matchAll(
+      /show\(layout\(\), "([A-Za-z_$][\w$]*)"[\s\S]*?<text[^>]*>\{paint\(([A-Za-z_$][\w$]*)\(/g,
+    )].map((m) => [m[1]!, m[2]!] as const)
+    assert.equal(guarded.length, inTui.length, "有 <text> 没被 show() 守卫包住")
+    for (const [guard, paint] of guarded) {
+      assert.equal(guard, paint, `守卫的行名 ${guard} 与 paint 的行名 ${paint} 对不上`)
+    }
   })
 })
 
@@ -710,10 +840,11 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
 
   /**
    * 侧栏可用宽不归我们定：170 格的终端实测只有 35 格（面板起点在第 130 列）。
-   * 任何一行超宽都会折行，把这块 10 行的面板撑成 11、12 行——
-   * 所以"能塞进 35 格"是版式的硬约束，比好不好看优先。
+   * 任何一行超宽都会折行、把面板撑高——所以"能塞进 35 格"是版式的硬约束，
+   * 比好不好看优先。**三档都要验**：展开档的历史明细行、紧凑档带成功率的
+   * 历史行，各自走的是不同的排版路径，一档过了不代表另一档也过。
    */
-  test("用满的数也不超侧栏可用宽 35 格", () => {
+  test("用满的数也不超侧栏可用宽 35 格（三档都验）", () => {
     const fat = snap({
       updated: 1,
       record: true,
@@ -738,9 +869,80 @@ describe("M6 版式：标签列对齐与视觉层次", () => {
         month: { ...bucket, cost: 12345.67, steps: 654321 },
       },
     })
-    for (const line of renderPanel(fat, "s1")) {
-      const w = width(line.text)
-      assert.ok(w <= 35, `${line.name} 占 ${w} 格 > 35：${JSON.stringify(line.text)}`)
+    let seen = 0
+    for (const layout of PANEL_LAYOUTS) {
+      for (const line of renderPanel(fat, "s1", layout)) {
+        seen++
+        const w = width(line.text)
+        assert.ok(
+          w <= 35,
+          `${layout} 档 ${line.name} 占 ${w} 格 > 35：${JSON.stringify(line.text)}`,
+        )
+      }
+    }
+    assert.equal(seen, 16 + 12 + 2, "三档行数之和变了")
+  })
+
+  /**
+   * 三档布局的机器：谁显示谁、循环顺序、配置值校验。
+   * 这三件事全在 `show` / `NEXT_LAYOUT` / `isPanelLayout` 里，
+   * 单测钉住它们，tui.tsx 那边就只要照着调用。
+   */
+  test("布局机器：子集有序、循环三步回原点、非法配置判否", () => {
+    for (const layout of PANEL_LAYOUTS) {
+      const lines = LAYOUT_LINES[layout]
+      // 每一档都必须是 FULL_ORDER 按序过滤的结果，不允许另排一套顺序
+      assert.deepEqual(
+        [...lines],
+        [...FULL_ORDER].filter((n) => lines.includes(n)),
+        `${layout} 档不是 FULL_ORDER 的有序子集`,
+      )
+      assert.equal(show(layout, "lineHeader"), true, "标题在任何档都要显示")
+    }
+    // 展开档多出来的四行
+    assert.equal(show("full", "lineSessionSuccess"), true)
+    assert.equal(show("full", "lineTodayDetail"), true)
+    assert.equal(show("compact", "lineSessionSuccess"), false)
+    assert.equal(show("compact", "lineTodayDetail"), false)
+    // 折叠档只剩标题与费用
+    assert.equal(show("collapsed", "lineSessionCost"), true)
+    assert.equal(show("collapsed", "lineDivider"), false)
+    assert.equal(show("collapsed", "lineTotal"), false)
+
+    let l: PanelLayout = "full"
+    for (const want of ["compact", "collapsed", "full"]) {
+      l = NEXT_LAYOUT[l]
+      assert.equal(l, want)
+    }
+
+    assert.equal(isPanelLayout("full"), true)
+    assert.equal(isPanelLayout("collapsed"), true)
+    assert.equal(isPanelLayout("Full"), false, "大小写要拒，别静默给了个错档")
+    assert.equal(isPanelLayout(""), false)
+    assert.equal(isPanelLayout(3), false)
+    assert.equal(isPanelLayout(undefined), false)
+    assert.equal(isPanelLayout(null), false)
+  })
+
+  test("展开档新增的两行只含各自那点字段", () => {
+    // 会话级成功率 = 标签 + 一个比率，不掺请求数也不掺命中率
+    const ok = lineSessionSuccess(s, "s1")
+    assert.equal(ok.length, 2)
+    assert.equal(ok[0]!.tone, "label")
+    assert.equal(width(ok[0]!.text), LABEL_W)
+    assert.equal(ok[1]!.tone, "value")
+    assert.match(ok[1]!.text, /^\d+(\.\d+)?%$/)
+
+    // 历史明细行：行首是 LABEL_W 个空格（缩进到数值列），
+    // 然后 成功率 · 请求数——纯数值/纯标签交替，金额一个都不在这行
+    for (const detail of [lineTodayDetail(s), lineMonthDetail(s), lineTotalDetail(s)]) {
+      assert.deepEqual(
+        detail.map((g) => g.tone),
+        ["label", "value", "label", "label", "value", "label"],
+      )
+      assert.equal(detail[0]!.text, " ".repeat(LABEL_W))
+      assert.match(plain(detail).trim(), /^[\d.]+% 成功 · [\d,]+ 请求$/)
+      assert.ok(!plain(detail).includes("¥"), "金额留在第一行，明细行不重复")
     }
   })
 

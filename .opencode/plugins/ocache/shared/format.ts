@@ -17,10 +17,11 @@
  * 2. **弱化标签、放亮数值**：字段名和分隔符一律 `label`，只有数值才是
  *    `value`，金额再单独给 `money`——一屏里眼睛只会往亮处走。
  *
- * **宽度是硬约束**：侧栏可用宽不归我们定（170 格终端实测约 35 格，
- * 由侧栏整体布局给）。加标签列等于每行吃掉 2~3 格，就得从内容里还回去，
- * 否则行会折行、面板被撑高。所以第 2 行的请求数挪到了第 6 行与费用作伴，
- * 累计行与今日/本月统一成"金额 · 成功率"的同形三行。任何时候改版都先量宽。
+ * **宽度是硬约束、纵向不是**：侧栏可用宽不归我们定（170 格终端实测约 35 格，
+ * 由侧栏整体布局给），超宽会被终端折行、把面板撑高；但行数不受限制
+ * （用户 2026-09-27 确认纵向空间充裕）。所以改版规则是：
+ * **一行装不下就拆两行，绝不折行**——`PanelLayout` 三档就是这条规则的产物。
+ * 每次改版都先按 `width()` 量一遍最坏情况（最大千分位、`100%`、六位数请求数）。
  */
 
 import { hitRate, successRate, type Bucket } from "./aggregate.ts"
@@ -260,12 +261,13 @@ export function lineHeader(s: Snapshot, sid: string): Seg[] {
 }
 
 /**
- * 第 2 行：请求数 · 缓存命中率（当前会话含子会话）。
+ * 请求 · 缓存命中率（当前会话含子会话）。
  *
  * 这行**只放两样**。M6 实测过放三样的后果：`请求 · 成功 · 命中` 连标签列一起
- * 要 39 格，侧栏只有 35 格，行会折行、把整块 10 行的面板撑成 11 行。
- * 让位的是**会话级成功率**——今日/本月/累计三行本来就各自带成功率，
- * 它在面板上出现四次是冗余；命中率是这个插件的主角，一次都不能少。
+ * 要 39 格，侧栏只有 35 格，行会折行、把面板撑高。会话级成功率因此挪到
+ * 紧邻的下一行（`lineSessionSuccess`）——横向换纵向，两样都不丢；
+ * 紧凑态才真的省掉它，因为那一档下面的历史三行本来就各带成功率。
+ * 命中率是这个插件的主角，一次都不能少。
  */
 export function lineSessionHit(s: Snapshot, sid: string): Seg[] {
   if (!s.sessions[sid]) return [emptyCell()]
@@ -276,6 +278,22 @@ export function lineSessionHit(s: Snapshot, sid: string): Seg[] {
     seg(" · 命中 ", "label"),
     seg(fmtPct(hitRate(b), 2), "value"),
   ]
+}
+
+/**
+ * 仅展开态：会话级请求成功率。
+ *
+ * 成功率和命中率说的是两件事——命中率跌可能只是换了个会话、上下文重新
+ * 填一遍，成功率跌则意味着请求在报错。两者会往相反方向走，都得看得见。
+ *
+ * 单占一行是因为三样挤一行实测要 39 格（`请求 · 成功 · 命中` 连标签列），
+ * 超侧栏 35 格就折行、把面板撑高。纵向既然宽松，就让它自己一行。
+ * 折叠态与紧凑态不显示它：紧凑态下面的历史三行各带成功率，够用。
+ */
+export function lineSessionSuccess(s: Snapshot, sid: string): Seg[] {
+  if (!s.sessions[sid]) return [emptyCell()]
+  const b = sessionBucket(s, sid)
+  return [head("成功"), seg(fmtPct(successRate(b)), "value")]
 }
 
 /**
@@ -360,52 +378,143 @@ export function lineSessionCost(s: Snapshot, sid: string): Seg[] {
 }
 
 /**
- * 第 7 行：分隔"当前会话"与"历史三口径"。
- * 固定宽度、不随终端变化——它标记的是语义边界，不是排版辅助线。
+ * 分隔线宽度：**正好铺满侧栏可用宽**。
+ *
+ * 早先是 20 格，比正文（最长 30 格）短出一截，看着像没画完
+ * （用户 2026-09-27 看图反馈"分隔符可以长一些"）。上下沿与中缝现在
+ * 一律铺满——它不是文字而是**版面边界**，短了就起不到
+ * "这块归 ocache"的分隔作用。
+ *
+ * **35 是硬上限**，不是可调的美观数字：终端把超宽的行折行、把整块面板
+ * 撑高（§4）。所以这里用 `repeat(35)` 而不是肉眼数出来的横杠条数——
+ * 数字一改，测试里的宽度守卫会立刻卡住它。
  */
-export const DIVIDER = "────────────────────"
+export const DIVIDER_WIDTH = 35
+export const DIVIDER = "─".repeat(DIVIDER_WIDTH)
 
 export function lineDivider(): Seg[] {
   return [seg(DIVIDER, "rule")]
 }
 
 /**
- * 今日 / 本月 / 累计三行的共同形状：标签 + 金额 + 成功率。
+ * 面板**上沿**的分隔线，与中间那条同宽同色。
  *
- * 同形是刻意的——三行竖着排，形状一致才会读成"一列金额 + 一列质量"，
- * 而不是三段互不相干的话。累计行原来还挂请求数，M6 去掉了：
- * 会话请求数已经在第 6 行，历史请求数与本月口径高度重合，
- * 换来的宽度正好让这三行保持同形。
+ * 加它是因为面板现在是侧栏的第一块内容：上面紧挨会话标题，下面挨着别的
+ * 插件，十几行数字没有边界就会和别人的文案黏成一片。三条线（上、中、下）
+ * 一起把面板框成一张"卡片"，眼睛一扫就知道哪儿是我们的地盘。
+ *
+ * **折叠档刻意不画**——折叠态是用户明选的"标题 + 费用两行"，再垫两行
+ * 装饰等于把折叠后一半的面积花在边框上，本末倒置。
  */
-function historyLine(label: string, s: Snapshot, b: Bucket): Seg[] {
+export function lineRuleTop(): Seg[] {
+  return [seg(DIVIDER, "rule")]
+}
+
+/** 面板**下沿**的分隔线，与上沿成对。见 `lineRuleTop`。 */
+export function lineRuleBottom(): Seg[] {
+  return [seg(DIVIDER, "rule")]
+}
+
+/**
+ * 面板密度三档，决定显示哪些行、以及历史行要不要拆成两行。
+ *
+ * - `full`（默认）：全部指标，14 行。35 格装不下的内容拆到第二行
+ *   （历史三行各带一条明细），纵向空间换横向宽度。
+ * - `compact`：10 行，每个口径压成一行，代价是丢掉会话级成功率与历史请求数。
+ * - `collapsed`：只剩标题与费用，2 行。
+ *
+ * 三档共用同一套行函数和同一个标签列，所以切换只是"显示/隐藏某些行"，
+ * 不存在"折叠后口径变了"这种事——同一格数字在三档里算法完全一致。
+ */
+export type PanelLayout = "full" | "compact" | "collapsed"
+
+/** 合法取值，供配置解析与测试遍历。 */
+export const PANEL_LAYOUTS = ["full", "compact", "collapsed"] as const
+
+/** 配置可能被手写成别的值，读到就退回默认档。 */
+export function isPanelLayout(v: unknown): v is PanelLayout {
+  return typeof v === "string" && (PANEL_LAYOUTS as readonly string[]).includes(v)
+}
+
+/**
+ * 今日 / 本月 / 累计的第一行：标签 + 金额（+ 紧凑态的成功率）。
+ *
+ * `compact` 只有一行可用来承接这个口径，所以成功率直接跟在金额后面。
+ * `full` 把成功率和请求数交给第二行，这里只留金额——于是会话费用、
+ * 今日、本月、累计**四笔金额竖在同一列**，一扫就能比大小。
+ */
+function historyLine(
+  label: string,
+  s: Snapshot,
+  b: Bucket,
+  layout: PanelLayout,
+): Seg[] {
+  const out: Seg[] = [head(label), seg(fmtCost(b.cost, s.currency), "money")]
+  if (layout === "compact") {
+    out.push(seg(" · ", "label"))
+    out.push(seg(fmtPct(successRate(b)), "value"))
+    out.push(seg(" 成功", "label"))
+  }
+  return out
+}
+
+/**
+ * 仅展开态：历史口径的第二行，承接紧凑态塞不下的成功率与请求数。
+ *
+ * 行首缩进 `LABEL_W` 而不是从 0 起——数值与上一行的金额左对齐，
+ * 读起来是上一行的下半截，而不是又冒出一个没有标签的新条目。
+ */
+function historyDetail(s: Snapshot, b: Bucket): Seg[] {
   return [
-    head(label),
-    seg(fmtCost(b.cost, s.currency), "money"),
-    seg(" · ", "label"),
+    seg(" ".repeat(LABEL_W), "label"),
     seg(fmtPct(successRate(b)), "value"),
     seg(" 成功", "label"),
+    seg(" · ", "label"),
+    seg(fmtInt(b.steps), "value"),
+    seg(" 请求", "label"),
   ]
 }
 
-/** 第 8 行：今日。 */
-export function lineToday(s: Snapshot): Seg[] {
+/** 今日（第一行）。 */
+export function lineToday(s: Snapshot, layout: PanelLayout = "compact"): Seg[] {
   const b = s.agg?.today
   if (!b) return [emptyCell()]
-  return historyLine("今日", s, b)
+  return historyLine("今日", s, b, layout)
 }
 
-/** 第 9 行：本月。 */
-export function lineMonth(s: Snapshot): Seg[] {
+/** 今日的明细行（仅展开态）。 */
+export function lineTodayDetail(s: Snapshot): Seg[] {
+  const b = s.agg?.today
+  if (!b) return [emptyCell()]
+  return historyDetail(s, b)
+}
+
+/** 本月（第一行）。 */
+export function lineMonth(s: Snapshot, layout: PanelLayout = "compact"): Seg[] {
   const b = s.agg?.month
   if (!b) return [emptyCell()]
-  return historyLine("本月", s, b)
+  return historyLine("本月", s, b, layout)
 }
 
-/** 第 10 行：历史累计。 */
-export function lineTotal(s: Snapshot): Seg[] {
+/** 本月的明细行（仅展开态）。 */
+export function lineMonthDetail(s: Snapshot): Seg[] {
+  const b = s.agg?.month
+  if (!b) return [emptyCell()]
+  return historyDetail(s, b)
+}
+
+/** 历史累计（第一行）。 */
+export function lineTotal(s: Snapshot, layout: PanelLayout = "compact"): Seg[] {
   const b = s.agg?.totals
   if (!b) return [emptyCell()]
-  return historyLine("累计", s, b)
+  return historyLine("累计", s, b, layout)
+}
+
+/** 历史累计的明细行（仅展开态）。 */
+export function lineTotalDetail(s: Snapshot): Seg[] {
+  const b = s.agg?.totals
+  if (!b) return [emptyCell()]
+  return historyDetail(s, b)
 }
 
 /** 面板一行的渲染结果：`name` 与 tui.tsx 里调用的标识符一一对应。 */
@@ -415,29 +524,118 @@ export interface PanelLine {
 }
 
 /**
- * 整块面板的全部行（顺序即 tui.tsx 里固定 `<text>` 的顺序）。
+ * 展开态的完整行序。**tui.tsx 里 `<text>` 的书写顺序必须与此逐条一致**，
+ * 反查测试会把 tui.tsx 的标识符序列抽出来与它比对（A2）。
+ *
+ * 放在一处而不是散在 tui.tsx 里，是因为紧凑态/折叠态都要从这个序列里
+ * 各取一个子集——顺序只在这里定义一次，三档就不会各排各的。
+ *
+ * 首尾两条 `lineRule*` 是面板的上下沿，把整块内容框成一张卡片。
+ */
+export const FULL_ORDER = [
+  "lineRuleTop",
+  "lineHeader",
+  "lineSessionHit",
+  "lineSessionSuccess",
+  "lineSessionRecent",
+  "lineSessionMissRead",
+  "lineSessionWriteOut",
+  "lineSessionCost",
+  "lineDivider",
+  "lineToday",
+  "lineTodayDetail",
+  "lineMonth",
+  "lineMonthDetail",
+  "lineTotal",
+  "lineTotalDetail",
+  "lineRuleBottom",
+] as const
+
+/**
+ * 三档各显示哪些行，顺序一律取自 `FULL_ORDER`。
+ *
+ * 因此折叠态显示"标题 → 费用"是**过滤**出来的结果，不是另排的顺序：
+ * 中间那几行被摘掉后，标题后面紧跟的就是费用。顺序定义只有一处。
+ *
+ * 折叠态还要额外滤掉首尾两条边框线——它只留两行内容，不该再花两行画框。
+ */
+export const LAYOUT_LINES: Record<PanelLayout, readonly string[]> = {
+  full: FULL_ORDER,
+  compact: FULL_ORDER.filter(
+    (name) => name !== "lineSessionSuccess" && !name.endsWith("Detail"),
+  ),
+  collapsed: FULL_ORDER.filter(
+    (name) => name === "lineHeader" || name === "lineSessionCost",
+  ),
+}
+
+/** 命令面板里的循环顺序：展开 → 紧凑 → 折叠 → 展开。 */
+export const NEXT_LAYOUT: Record<PanelLayout, PanelLayout> = {
+  full: "compact",
+  compact: "collapsed",
+  collapsed: "full",
+}
+
+/**
+ * 这一行在当前布局下要不要挂 `<text>`。
+ *
+ * tui.tsx 用它逐行守卫，因为**空的 `<text>` 会占一整行**（M6 实测：
+ * 往面板头加三个空 `<text>`，标题被整整顶下去 3 行）。所以"不显示"必须
+ * 是不挂节点，而不能是渲染空串。行数只随布局变、不随数据变，于是
+ * 节点结构仅在切换布局那一瞬变化，不满足 §4 担心的"每秒重建子树"。
+ */
+export function show(layout: PanelLayout, name: string): boolean {
+  return LAYOUT_LINES[layout].includes(name)
+}
+
+/** 把一行的标识符映射到它的行内容；`layout` 只影响历史行是否带成功率。 */
+function allLines(
+  s: Snapshot,
+  sid: string,
+  layout: PanelLayout,
+): Record<string, Seg[]> {
+  return {
+    lineHeader: lineHeader(s, sid),
+    lineSessionHit: lineSessionHit(s, sid),
+    lineSessionSuccess: lineSessionSuccess(s, sid),
+    lineSessionRecent: lineSessionRecent(s, sid),
+    lineSessionMissRead: lineSessionMissRead(s, sid),
+    lineSessionWriteOut: lineSessionWriteOut(s, sid),
+    lineSessionCost: lineSessionCost(s, sid),
+    lineDivider: lineDivider(),
+    lineRuleTop: lineRuleTop(),
+    lineRuleBottom: lineRuleBottom(),
+    lineToday: lineToday(s, layout),
+    lineTodayDetail: lineTodayDetail(s),
+    lineMonth: lineMonth(s, layout),
+    lineMonthDetail: lineMonthDetail(s),
+    lineTotal: lineTotal(s, layout),
+    lineTotalDetail: lineTotalDetail(s),
+  }
+}
+
+/**
+ * 整块面板在指定布局下的全部行（顺序即 tui.tsx 里 `<text>` 的顺序）。
  *
  * 存在的意义是**给测试一个能整块断言的对象**：单行函数的断言只能保证
- * "这一行没写错"，保证不了"这十行拼起来还是那块面板"。把行序收在一处，
+ * "这一行没写错"，保证不了"这十几行拼起来还是那块面板"。把行序收在一处，
  * 测试既能整串快照，又能反查 tui.tsx 的渲染顺序有没有被人改乱。
  *
- * 注意 tui.tsx **仍然**用十条固定的 `<text>` 而不是 `.map` 本函数——
+ * 注意 tui.tsx **仍然**用固定数量的 `<text>` 而不是 `.map` 本函数——
  * `.map` 每秒重建整棵子树、终端里会闪（REQUIREMENTS §4 实现约束）。
  * 这里只是它的等价描述，不参与实际渲染。
  */
-export function renderPanel(s: Snapshot, sid: string): PanelLine[] {
-  return [
-    { name: "lineHeader", text: plain(lineHeader(s, sid)) },
-    { name: "lineSessionHit", text: plain(lineSessionHit(s, sid)) },
-    { name: "lineSessionRecent", text: plain(lineSessionRecent(s, sid)) },
-    { name: "lineSessionMissRead", text: plain(lineSessionMissRead(s, sid)) },
-    { name: "lineSessionWriteOut", text: plain(lineSessionWriteOut(s, sid)) },
-    { name: "lineSessionCost", text: plain(lineSessionCost(s, sid)) },
-    { name: "lineDivider", text: plain(lineDivider()) },
-    { name: "lineToday", text: plain(lineToday(s)) },
-    { name: "lineMonth", text: plain(lineMonth(s)) },
-    { name: "lineTotal", text: plain(lineTotal(s)) },
-  ]
+export function renderPanel(
+  s: Snapshot,
+  sid: string,
+  layout: PanelLayout = "full",
+): PanelLine[] {
+  const all = allLines(s, sid, layout)
+  const out: PanelLine[] = []
+  for (const name of LAYOUT_LINES[layout]) {
+    out.push({ name, text: plain(all[name] ?? []) })
+  }
+  return out
 }
 
 /** 供 tui.tsx 引用的类型，避免它直接依赖聚合层细节。 */
